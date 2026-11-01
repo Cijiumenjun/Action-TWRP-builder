@@ -10,30 +10,18 @@ jobs:
     permissions:
       contents: write
     steps:
-    - name: Display Run Parameters
-      run: |
-        echo "::group::User Environment Variables"
-        echo "Manifest URL: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni"
-        echo "Manifest Branch: twrp-8.1"
-        echo "Device Tree URL: https://github.com/Cijumenjun/w377e.git"
-        echo "Device Tree Branch: main"
-        echo "Device Path: device/sprd/uws6137"
-        echo "Device Name: uws6137"
-        echo "Makefile Name: omni_uws6137"
-        echo "Build Target: recovery.img"
-        echo "::endgroup::"
-
     - name: Check Out
       uses: actions/checkout@v3
-
-    - name: Cleanup
-      uses: rokibhasansagar/slimhub_actions@main
 
     - name: Prepare the environment
       run: |
         sudo apt update
         sudo apt -y upgrade
-        sudo apt -y install gperf gcc-multilib gcc-10-multilib g++-multilib g++-10-multilib libc6-dev lib32ncurses5-dev x11proto-core-dev libx11-dev tree lib32z-dev libgl1-mesa-dev libxml2-utils xsltproc bc ccache lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libwxgtk3.0-gtk3-dev libxml2 lzop pngcrush schedtool squashfs-tools imagemagick libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libncurses5 python
+        sudo apt -y install gperf gcc-multilib g++-multilib libc6-dev libncurses5-dev x11proto-core-dev libx11-dev tree lib32z-dev libgl1-mesa-dev libxml2-utils xsltproc bc ccache lib32readline-dev lib32z1-dev liblz4-tool libsdl1.2-dev libxml2 lzop pngcrush schedtool squashfs-tools imagemagick libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev python3
+        # 兼容 22.04 缺少的旧版库
+        sudo dpkg --add-architecture i386
+        sudo apt update
+        sudo apt -y install libncurses5:i386 libncurses5
 
     - name: Install OpenJDK
       uses: actions/setup-java@v3
@@ -86,9 +74,5 @@ jobs:
         files: workspace/out/target/product/uws6137/recovery.img
         name: uws6137-${{ github.run_id }}
         tag_name: ${{ github.run_id }}
-        body: |
-          Manifest: twrp-8.1
-          Device: uws6137
-          Target: recovery.img
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
