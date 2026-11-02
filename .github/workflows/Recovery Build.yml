@@ -72,15 +72,17 @@ jobs:
 
     - name: Building recovery
       run: |
-        # 补丁1：绕过基带检查脚本
+        # 补丁1：绕过基带检查
         echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
-        # 补丁2：修复 post_process_props.py 的 iteritems() 报错
+        # 补丁2：修复 iteritems()
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
 
-        # 补丁3：更暴力的修复 clang-version-inc.py 的 print 语法报错
-        sed -i 's/print sys.stderr, \(.*\)$/print(\1, file=sys.stderr)/g' external/clang/clang-version-inc.py
+        # 补丁3：终极修复！把这个 clang 脚本里所有老旧的 print 语法全部加上括号
+        sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' external/clang/clang-version-inc.py
+        # 单独处理带 sys.stderr 的特殊情况
+        sed -i -E 's/print\((sys\.stderr, .*)\)/print(\2, file=\1)/g' external/clang/clang-version-inc.py
 
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
