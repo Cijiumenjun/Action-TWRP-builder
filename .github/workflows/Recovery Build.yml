@@ -58,7 +58,6 @@ jobs:
       
     - name: Clone device tree
       run: |
-        # 这次账号密码绝对对了！直接下载 ZIP 压缩包
         wget https://github.com/Cijiumenjun/w377e/archive/refs/heads/main.zip -O device_tree.zip
         unzip -q device_tree.zip
         mkdir -p ./device/sprd
@@ -73,6 +72,9 @@ jobs:
 
     - name: Building recovery
       run: |
+        # 自动修复老旧源码中的 Python 2 print 语法报错
+        sed -i 's/print \(.*\)/print(\1)/g' build/tools/check_radio_versions.py
+
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch omni_uws6137-eng && make clean && make recoveryimage -j$(nproc --all)
