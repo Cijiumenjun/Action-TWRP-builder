@@ -79,8 +79,8 @@ jobs:
         # 补丁2：修复 post_process_props.py 的 iteritems() 报错
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
 
-        # 补丁3：修复 clang-version-inc.py 的 print 语法报错
-        sed -i 's/print sys.stderr, "Usage: %s <version.inc>\\n"/print("Usage: %s <version.inc>\\n", file=sys.stderr)/g' external/clang/clang-version-inc.py
+        # 补丁3：更暴力的修复 clang-version-inc.py 的 print 语法报错
+        sed -i 's/print sys.stderr, \(.*\)$/print(\1, file=sys.stderr)/g' external/clang/clang-version-inc.py
 
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
