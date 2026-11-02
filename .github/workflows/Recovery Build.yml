@@ -61,7 +61,8 @@ jobs:
       
     - name: Clone device tree
       run: |
-        git clone https://github.com/Cijumenjun/w377e.git -b main ./device/sprd/uws6137
+        # 这里加入了 GITHUB_TOKEN，解决账号验证报错问题
+        git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Cijumenjun/w377e.git -b main ./device/sprd/uws6137
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Set Swap Space
