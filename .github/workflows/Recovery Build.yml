@@ -101,6 +101,9 @@ jobs:
         sed -i 's/import ConfigParser/import configparser/g' bionic/libc/fs_config_generator.py
         sed -i 's/ConfigParser\./configparser./g' bionic/libc/fs_config_generator.py
 
+        # 补丁7：修复 bionic 脚本里 iteritems() 的报错
+        sed -i 's/\.iteritems()/\.items()/g' bionic/libc/fs_config_generator.py
+
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch omni_uws6137-eng && make clean && make recoveryimage -j$(nproc --all)
