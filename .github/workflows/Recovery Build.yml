@@ -93,9 +93,13 @@ jobs:
         export CFLAGS="-Wno-error"
         export CXXFLAGS="-Wno-error"
 
-        # 补丁5：修复 bionic 脚本里的 Python 2 语法报错
+        # 补丁5：修复 bionic 脚本里的 Python 2 print 语法报错
         sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' bionic/libc/fs_config_generator.py
         sed -i 's/print >> sys.stderr, \(.*\)$/print(\1, file=sys.stderr)/g' bionic/libc/fs_config_generator.py
+
+        # 补丁6：修复 Python 3 下 ConfigParser 模块改名报错
+        sed -i 's/import ConfigParser/import configparser/g' bionic/libc/fs_config_generator.py
+        sed -i 's/ConfigParser\./configparser./g' bionic/libc/fs_config_generator.py
 
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
