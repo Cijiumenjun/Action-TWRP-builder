@@ -79,10 +79,13 @@ jobs:
         # 补丁2：修复 iteritems()
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
 
-        # 补丁3：终极修复！把这个 clang 脚本里所有老旧的 print 语法全部加上括号
-        sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' external/clang/clang-version-inc.py
-        # 单独处理带 sys.stderr 的特殊情况
-        sed -i -E 's/print\((sys\.stderr, .*)\)/print(\2, file=\1)/g' external/clang/clang-version-inc.py
+        # 补丁3：终极魔法！直接暴力重写 clang 的老旧脚本，让它只输出版本号，彻底告别语法错误
+        cat > external/clang/clang-version-inc.py << 'EOF'
+        #!/usr/bin/env python3
+        import sys
+        print("#define CLANG_VERSION 8.0.0")
+        EOF
+        chmod +x external/clang/clang-version-inc.py
 
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
