@@ -72,12 +72,15 @@ jobs:
 
     - name: Building recovery
       run: |
-        # 修复基带脚本 Python2 语法报错，直接绕过
+        # 补丁1：绕过基带检查脚本
         echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
-        # 修复 post_process_props.py 里的 iteritems() 报错
+        # 补丁2：修复 post_process_props.py 的 iteritems() 报错
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
+
+        # 补丁3：修复 clang-version-inc.py 的 print 语法报错
+        sed -i 's/print sys.stderr, "Usage: %s <version.inc>\\n"/print("Usage: %s <version.inc>\\n", file=sys.stderr)/g' external/clang/clang-version-inc.py
 
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
