@@ -79,13 +79,23 @@ jobs:
         # 补丁2：修复 iteritems()
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
 
-        # 补丁3：终极魔法！直接暴力重写 clang 的老旧脚本，让它只输出版本号，彻底告别语法错误
+        # 补丁3：重写 clang 老旧脚本
         cat > external/clang/clang-version-inc.py << 'EOF'
         #!/usr/bin/env python3
         import sys
         print("#define CLANG_VERSION 8.0.0")
         EOF
         chmod +x external/clang/clang-version-inc.py
+
+        # 补丁4：暴力魔法！强制忽略 C/C++ 编译警告报错
+        export TARGET_CFLAGS="-Wno-error"
+        export TARGET_CXXFLAGS="-Wno-error"
+        export CFLAGS="-Wno-error"
+        export CXXFLAGS="-Wno-error"
+
+        # 补丁5：修复 bionic 脚本里的 Python 2 语法报错
+        sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' bionic/libc/fs_config_generator.py
+        sed -i 's/print >> sys.stderr, \(.*\)$/print(\1, file=sys.stderr)/g' bionic/libc/fs_config_generator.py
 
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
