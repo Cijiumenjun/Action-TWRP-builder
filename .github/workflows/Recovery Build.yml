@@ -5,16 +5,9 @@ on:
 
 jobs:
   build:
-    # 只有仓库 owner 本人手动触发才会跑；如果仓库属于 organization，
-    # 这个条件会让任何成员点 Run workflow 都被静默 skip。
     if: github.event.repository.owner.id == github.event.sender.id
-
-    # AOSP 8.1 是 2017 年的代码。ubuntu-latest 现在是 24.04（以后还会漂到 26.04），
-    # host GCC/Python/OpenSSL 太新，会不断冒出新的编译错误。固定 22.04 稳定得多。
-    # 如果哪天 22.04 的 label 被 GitHub 下线，再换回 ubuntu-24.04 并补新补丁。
     runs-on: ubuntu-22.04
     timeout-minutes: 350
-
     permissions:
       contents: write
 
@@ -30,22 +23,19 @@ jobs:
           squashfs-tools xsltproc zip unzip zlib1g-dev \
           python-is-python3 python3 wget
 
-        # 32 位库主要是给 2017 年的 prebuilt aapt 用的，编 recoveryimage 不一定用得上；
-        # 装不上也不应该让整个 job 直接挂掉。
         sudo dpkg --add-architecture i386
         sudo apt-get update
         sudo DEBIAN_FRONTEND=noninteractive apt-get -y install \
           libc6:i386 libstdc++6:i386 zlib1g:i386 libncurses6:i386 libtinfo6:i386 || true
         sudo DEBIAN_FRONTEND=noninteractive apt-get -y install lib32z1-dev || true
 
-        # 老 prebuilt 还在找 .so.5，建软链兜底
         sudo ln -sf /lib/x86_64-linux-gnu/libncurses.so.6 /lib/x86_64-linux-gnu/libncurses.so.5 || true
         sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6   /lib/x86_64-linux-gnu/libtinfo.so.5   || true
         sudo ln -sf /lib/i386-linux-gnu/libncurses.so.6   /lib/i386-linux-gnu/libncurses.so.5   || true
         sudo ln -sf /lib/i386-linux-gnu/libtinfo.so.6     /lib/i386-linux-gnu/libtinfo.so.5     || true
 
     - name: Install OpenJDK 8
-      uses: actions/setup-java@v5
+      uses: actions/setup-java@v4
       with:
         distribution: 'zulu'
         java-version: '8'
@@ -56,7 +46,7 @@ jobs:
         curl -fL --retry 5 --retry-delay 3 \
           -o ~/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
         chmod a+x ~/bin/repo
-        test -s ~/bin/repo          # curl 失败时不要留个空文件继续往下跑
+        test -s ~/bin/repo
         sudo ln -sf ~/bin/repo /usr/bin/repo
         repo --version | head -n 2
 
@@ -69,13 +59,11 @@ jobs:
         git config --global user.name "Cijiumenjun"
         git config --global user.email "cijiumenjun@example.com"
         repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni -b twrp-8.1
-        df -h .
 
     - name: Repo Sync
       working-directory: workspace
       run: |
         repo sync -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags
-        df -h .
 
     - name: Clone device tree
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
@@ -86,33 +74,35 @@ jobs:
         rm -rf ./device/sprd/uws6137
         mv w377e-main ./device/sprd/uws6137
         rm -f device_tree.zip
-        # 确认 zip 结构没变、关键文件都在
         test -f device/sprd/uws6137/BoardConfig.mk
         test -f device/sprd/uws6137/omni_uws6137.mk
-        ls -l device/sprd/uws6137
 
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 整段输出同时写进 recovery-build.log，失败时能直接从 artifact 里看真正的报错
         exec > >(tee -a recovery-build.log) 2>&1
 
-        # ---------- 1. 把 Python 2 脚本修成 Python 3 能跑 ----------
-
-        # radio 版本检查脚本，直接让它通过
+        # 1. 绕过基带检查
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
-        # external/clang 的版本脚本在老 host 上跑不起来，直接给固定值
+        # 2. 修复 clang 版本脚本
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
-        # 关键：fs_config 生成器的真实文件是 build/tools/fs_config/fs_config_generator.py，
-        # bionic/libc/fs_config_generator.py 只是指向它的软链。
-        # 对软链做 sed -i 会把它替换成一个普通副本，补丁就打偏了；这里直接改真实文件。
+        # 3. 修复 dumpkey 主类问题：全局修改 Makefile，强制用 -cp 调用
+        grep -rl "java -jar.*dumpkey.jar" build/ | xargs sed -i 's/java -jar \(.*dumpkey.jar\)/java -cp \1 com.android.dumpkey.DumpPublicKey/g' 2>/dev/null || true
+
+        # 4. 修复所有 Python 2 脚本的 print 语法（包含 normalize_path.py）
+        find build/tools -name '*.py' -type f -print0 | while IFS= read -r -d '' f; do
+          sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$f" || true
+          sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$f" || true
+          sed -i 's/\.iteritems()/\.items()/g' "$f" || true
+        done
+
+        # 5. 修复 fs_config_generator.py 各种问题
         FS_CFG=build/tools/fs_config/fs_config_generator.py
         if [ -f "$FS_CFG" ]; then
-          # print >> 必须在普通 print 规则之前处理，否则会被改坏
           sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$FS_CFG" || true
           sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$FS_CFG" || true
           sed -i 's/\.iteritems()/\.items()/g' "$FS_CFG" || true
@@ -122,33 +112,18 @@ jobs:
           sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
 
-        # build/tools 下其它 Python 2 脚本（dumpkey.jar 打包时会调用）
-        find build/tools -name '*.py' -type f -print0 | while IFS= read -r -d '' f; do
-          sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$f" || true
-          sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$f" || true
-          sed -i 's/\.iteritems()/\.items()/g' "$f" || true
-        done
-
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py || true
         sed -i '/qcom_diag/d' system/core/include/private/android_filesystem_config.h 2>/dev/null || true
 
-        # ---------- 2. 编译环境 ----------
+        # 6. 编译环境
         export LANG=C
         export LC_ALL=C
         export LC_COLLATE=C
         export ALLOW_MISSING_DEPENDENCIES=true
 
-        # TeamWin 的 envsetup.sh 里 lunch 每次都会调用 vendor/omni/build/tools/roomservice.py
-        # （去 gerrit 找设备树和依赖）。这个脚本是 Python 2 语法
-        # (except IOError, ES.ParseError:)，python3 下直接 SyntaxError；
-        # 而且 lunch 里这条命令一失败，set -e 会让整个 step 立刻退出。
-        # 设备树已经手动放进去了，不需要它去拉依赖，直接空跑。
+        # 修复 lunch 时调用的 roomservice.py
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
-
-        # 说明：AOSP 8.1 实际用的是 TARGET_GLOBAL_CFLAGS / HOST_GLOBAL_CFLAGS，
-        # export TARGET_CFLAGS / CFLAGS 基本进不了编译命令。
-        # 真遇到 -Werror / -fno-common 这类报错，要改 build/core/combo/*.mk 才有效。
 
         source build/envsetup.sh
         lunch omni_uws6137-eng
@@ -157,8 +132,6 @@ jobs:
         echo "TARGET_DEVICE=$DEVICE"
         test "$DEVICE" = "uws6137"
 
-        # setup-java 的 JDK 8 能用就优先用；prebuilts/jdk/jdk8 是 2016 年的旧版，
-        # 在新 glibc 上不一定还能跑。
         if ! java -version >/dev/null 2>&1; then
           if [ -x prebuilts/jdk/jdk8/linux-x86/bin/java ]; then
             export PATH="$(pwd)/prebuilts/jdk/jdk8/linux-x86/bin:$PATH"
@@ -170,11 +143,7 @@ jobs:
 
         make recoveryimage -j4
 
-        # ---------- 3. 产物检查 ----------
         test -f out/target/product/uws6137/recovery.img
-        ls -l out/target/product/uws6137/recovery.img
-        # 重点确认 ramdisk 里放的是新编的 TWRP，而不是设备树里那个 stock recovery
-        ls -l out/target/product/uws6137/recovery/root/sbin/recovery || true
 
     - name: Upload build log on failure
       if: failure()
@@ -197,7 +166,6 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: workspace/out/target/product/uws6137/recovery.img
-        # 文件不存在就直接报错，不要发一个空 release
         fail_on_unmatched_files: true
         name: uws6137-${{ github.run_id }}
         tag_name: ${{ github.run_id }}
