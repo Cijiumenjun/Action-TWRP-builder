@@ -104,6 +104,12 @@ jobs:
         # 补丁7：修复 bionic 脚本里 iteritems() 的报错
         sed -i 's/\.iteritems()/\.items()/g' bionic/libc/fs_config_generator.py
 
+        # 补丁8：修复 roomservice.py 的异常捕获语法
+        sed -i -E 's/except ([A-Za-z0-9_.]+), ([A-Za-z0-9_.]+):/except (\1, \2):/g' vendor/omni/build/tools/roomservice.py
+
+        # 补丁9：修复 fs_config_generator.py 中 int 和 str 比较的报错
+        sed -i 's/return any(lower <= value <= upper for (lower, upper) in ranges)/return any(int(lower) <= int(value) <= int(upper) for (lower, upper) in ranges)/g' bionic/libc/fs_config_generator.py
+
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch omni_uws6137-eng && make clean && make recoveryimage -j$(nproc --all)
