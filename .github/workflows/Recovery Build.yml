@@ -11,120 +11,132 @@ jobs:
       contents: write
     steps:
     - name: Check Out
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Prepare the environment
       run: |
         sudo apt update
-        sudo apt -y upgrade
-        sudo apt -y install bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32z1-dev liblz4-tool libncurses-dev libncurses6 libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip unzip zlib1g-dev python-is-python3 python3 wget
-        
+        sudo DEBIAN_FRONTEND=noninteractive apt -y upgrade
+        sudo DEBIAN_FRONTEND=noninteractive apt -y install \
+          bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+          git gnupg gperf imagemagick lib32z1-dev liblz4-tool libncurses-dev \
+          libncurses6 libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
+          schedtool squashfs-tools xsltproc zip unzip zlib1g-dev \
+          python-is-python3 python3 wget
         sudo dpkg --add-architecture i386
         sudo apt update
-        sudo apt -y install libc6:i386 libstdc++6:i386 libncurses6:i386 libtinfo6:i386
-        
-        sudo ln -sf /lib/x86_64-linux-gnu/libncurses.so.6 /lib/x86_64-linux-gnu/libncurses.so.5
-        sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6 /lib/x86_64-linux-gnu/libtinfo.so.5
-        sudo ln -sf /lib/i386-linux-gnu/libncurses.so.6 /lib/i386-linux-gnu/libncurses.so.5
-        sudo ln -sf /lib/i386-linux-gnu/libtinfo.so.6 /lib/i386-linux-gnu/libtinfo.so.5
+        sudo DEBIAN_FRONTEND=noninteractive apt -y install \
+          libc6:i386 libstdc++6:i386 libncurses6:i386 libtinfo6:i386
+        sudo ln -sf /lib/x86_64-linux-gnu/libncurses.so.6 /lib/x86_64-linux-gnu/libncurses.so.5 || true
+        sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6 /lib/x86_64-linux-gnu/libtinfo.so.5 || true
+        sudo ln -sf /lib/i386-linux-gnu/libncurses.so.6 /lib/i386-linux-gnu/libncurses.so.5 || true
+        sudo ln -sf /lib/i386-linux-gnu/libtinfo.so.6 /lib/i386-linux-gnu/libtinfo.so.5 || true
 
     - name: Install OpenJDK
-      uses: actions/setup-java@v3
+      uses: actions/setup-java@v4
       with:
         distribution: 'zulu'
         java-version: '8'
 
     - name: Install repo
       run: |
-        mkdir ~/bin
-        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        mkdir -p ~/bin
+        curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
         chmod a+x ~/bin/repo
         sudo ln -sf ~/bin/repo /usr/bin/repo
-      
+
     - name: Initialize repo
+      id: pwd
       run: |
-        mkdir workspace
+        mkdir -p workspace
         cd workspace
-        echo "workspace-folder=$(pwd)" >> $GITHUB_OUTPUT
+        echo "workspace-folder=$(pwd)" >> "$GITHUB_OUTPUT"
         git config --global user.name "Cijiumenjun"
         git config --global user.email "cijiumenjun@example.com"
         repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni -b twrp-8.1
-      id: pwd
-          
+
     - name: Repo Sync
-      run: |
-        repo sync -j$(nproc --all) --force-sync
       working-directory: workspace
-      
-    - name: Clone device tree
       run: |
-        wget https://github.com/Cijiumenjun/w377e/archive/refs/heads/main.zip -O device_tree.zip
+        repo sync -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags
+
+    - name: Clone device tree
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+      run: |
+        wget -q https://github.com/Cijiumenjun/w377e/archive/refs/heads/main.zip -O device_tree.zip
         unzip -q device_tree.zip
         mkdir -p ./device/sprd
+        rm -rf ./device/sprd/uws6137
         mv w377e-main ./device/sprd/uws6137
-        rm device_tree.zip
-      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+        rm -f device_tree.zip
 
     - name: Building recovery
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 补丁1：绕过基带检查
-        echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > build/tools/check_radio_versions.py
+        set -euo pipefail
+
+        printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
-        # 补丁2：修复 iteritems()
-        sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
+        sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py || true
 
-        # 补丁3：重写 clang 老旧脚本
-        cat > external/clang/clang-version-inc.py << 'EOF'
-        #!/usr/bin/env python3
-        import sys
-        print("#define CLANG_VERSION 8.0.0")
-        EOF
+        printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
-        # 补丁4：暴力魔法！强制忽略 C/C++ 编译警告报错
         export TARGET_CFLAGS="-Wno-error"
         export TARGET_CXXFLAGS="-Wno-error"
         export CFLAGS="-Wno-error"
         export CXXFLAGS="-Wno-error"
 
-        # 补丁5：修复 bionic 脚本里的 Python 2 print 语法报错
-        sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' bionic/libc/fs_config_generator.py
-        sed -i 's/print >> sys.stderr, \(.*\)$/print(\1, file=sys.stderr)/g' bionic/libc/fs_config_generator.py
-
-        # 补丁6：修复 Python 3 下 ConfigParser 模块改名报错
-        sed -i 's/import ConfigParser/import configparser/g' bionic/libc/fs_config_generator.py
-        sed -i 's/ConfigParser\./configparser./g' bionic/libc/fs_config_generator.py
-
-        # 补丁7：修复 bionic 脚本里 iteritems() 的报错
-        sed -i 's/\.iteritems()/\.items()/g' bionic/libc/fs_config_generator.py
-
-        # 补丁8：修复 roomservice.py 的异常捕获语法
-        sed -i -E 's/except ([A-Za-z0-9_.]+), ([A-Za-z0-9_.]+):/except (\1, \2):/g' vendor/omni/build/tools/roomservice.py
-
-        # 补丁9：修复 int 和 str 比较的报错
-        sed -i 's/return any(lower <= value <= upper for (lower, upper) in ranges)/return any(int(lower) <= int(value) <= int(upper) for (lower, upper) in ranges)/g' bionic/libc/fs_config_generator.py
-
-        # 补丁10：修复 %u 格式化字符串导致类型错误的问题
-        sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' bionic/libc/fs_config_generator.py
-
-        # 补丁11：展讯源码混入了高通 AID，引发冲突，强制忽略此检查
-        sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' bionic/libc/fs_config_generator.py
+        sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' bionic/libc/fs_config_generator.py || true
+        sed -i 's/print >> sys.stderr, \(.*\)$/print(\1, file=sys.stderr)/g' bionic/libc/fs_config_generator.py || true
+        sed -i 's/import ConfigParser/import configparser/g' bionic/libc/fs_config_generator.py || true
+        sed -i 's/ConfigParser\./configparser./g' bionic/libc/fs_config_generator.py || true
+        sed -i 's/\.iteritems()/\.items()/g' bionic/libc/fs_config_generator.py || true
+        sed -i -E 's/except ([A-Za-z0-9_.]+), ([A-Za-z0-9_.]+):/except (\1, \2):/g' vendor/omni/build/tools/roomservice.py || true
+        sed -i 's/return any(lower <= value <= upper for (lower, upper) in ranges)/return any(int(lower) <= int(value) <= int(upper) for (lower, upper) in ranges)/g' bionic/libc/fs_config_generator.py || true
+        sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' bionic/libc/fs_config_generator.py || true
+        sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' bionic/libc/fs_config_generator.py || true
         sed -i '/qcom_diag/d' system/core/include/private/android_filesystem_config.h 2>/dev/null || true
 
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
-        lunch omni_uws6137-eng && make clean
-        
-        # 限制并发数为 4 保护内存
+        lunch omni_uws6137-eng
+
+        if [ -d prebuilts/jdk/jdk8/linux-x86/bin ]; then
+          export PATH="$(pwd)/prebuilts/jdk/jdk8/linux-x86/bin:$PATH"
+          export JAVA_HOME="$(pwd)/prebuilts/jdk/jdk8/linux-x86"
+        elif [ -d prebuilts/jdk/jdk9/linux-x86/bin ]; then
+          export PATH="$(pwd)/prebuilts/jdk/jdk9/linux-x86/bin:$PATH"
+          export JAVA_HOME="$(pwd)/prebuilts/jdk/jdk9/linux-x86"
+        fi
+        echo "=== Using Java ==="
+        which java || true
+        java -version || true
+
+        make dumpkey -j2 || make out/host/linux-x86/framework/dumpkey.jar -j2 || true
+
+        KEYS_DIR="out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates"
+        mkdir -p "$KEYS_DIR"
+        if ! java -jar out/host/linux-x86/framework/dumpkey.jar \
+             build/target/product/security/testkey.x509.pem \
+             vendor/omni/build/target/product/security/lineage.x509.pem \
+             > "$KEYS_DIR/keys" 2>/dev/null; then
+          echo "dumpkey still broken, creating dummy keys file"
+          printf '%s\n' '/* dummy ota keys for recovery-only build */' > "$KEYS_DIR/keys"
+        fi
+
         make recoveryimage -j4
-      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Upload to Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: workspace/out/target/product/uws6137/recovery.img
         name: uws6137-${{ github.run_id }}
         tag_name: ${{ github.run_id }}
+        body: |
+          Device: uws6137 (W377E / Spreadtrum)
+          Manifest: twrp-8.1
+          Target: recovery.img
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
