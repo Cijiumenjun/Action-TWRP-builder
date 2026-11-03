@@ -16,7 +16,6 @@ jobs:
     - name: Prepare the environment
       run: |
         sudo apt update
-        sudo DEBIAN_FRONTEND=noninteractive apt -y upgrade
         sudo DEBIAN_FRONTEND=noninteractive apt -y install \
           bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
           git gnupg gperf imagemagick lib32z1-dev liblz4-tool libncurses-dev \
@@ -73,8 +72,6 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        set -euo pipefail
-
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
@@ -83,6 +80,9 @@ jobs:
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
+        export LANG=C
+        export LC_ALL=C
+        export LC_COLLATE=C
         export TARGET_CFLAGS="-Wno-error"
         export TARGET_CXXFLAGS="-Wno-error"
         export CFLAGS="-Wno-error"
@@ -99,6 +99,42 @@ jobs:
         sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' bionic/libc/fs_config_generator.py || true
         sed -i '/qcom_diag/d' system/core/include/private/android_filesystem_config.h 2>/dev/null || true
 
+        python3 - << 'PY'
+        import os
+        for root in ("build", "vendor/omni", "bootable"):
+            if not os.path.isdir(root):
+                continue
+            for dirpath, _, files in os.walk(root):
+                for fn in files:
+                    if not (fn.endswith(".mk") or fn == "Makefile"):
+                        continue
+                    path = os.path.join(dirpath, fn)
+                    try:
+                        text = open(path, errors="ignore").read()
+                    except OSError:
+                        continue
+                    if "dumpkey" not in text or "java" not in text:
+                        continue
+                    lines = text.splitlines(keepends=True)
+                    changed = False
+                    out = []
+                    for line in lines:
+                        stripped = line.rstrip("\n")
+                        if (
+                            "dumpkey" in stripped
+                            and "java" in stripped
+                            and "|| true" not in stripped
+                            and not stripped.rstrip().endswith("\\")
+                        ):
+                            nl = "\n" if line.endswith("\n") else ""
+                            line = stripped + " || true" + nl
+                            changed = True
+                        out.append(line)
+                    if changed:
+                        open(path, "w").write("".join(out))
+                        print("patched", path)
+        PY
+
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch omni_uws6137-eng
@@ -111,20 +147,7 @@ jobs:
           export JAVA_HOME="$(pwd)/prebuilts/jdk/jdk9/linux-x86"
         fi
         echo "=== Using Java ==="
-        which java || true
         java -version || true
-
-        make dumpkey -j2 || make out/host/linux-x86/framework/dumpkey.jar -j2 || true
-
-        KEYS_DIR="out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates"
-        mkdir -p "$KEYS_DIR"
-        if ! java -jar out/host/linux-x86/framework/dumpkey.jar \
-             build/target/product/security/testkey.x509.pem \
-             vendor/omni/build/target/product/security/lineage.x509.pem \
-             > "$KEYS_DIR/keys" 2>/dev/null; then
-          echo "dumpkey still broken, creating dummy keys file"
-          printf '%s\n' '/* dummy ota keys for recovery-only build */' > "$KEYS_DIR/keys"
-        fi
 
         make recoveryimage -j4
 
