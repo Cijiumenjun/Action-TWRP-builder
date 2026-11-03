@@ -65,15 +65,6 @@ jobs:
         rm device_tree.zip
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
-    - name: Create Swap Space (防爆内存)
-      run: |
-        # 改用 dd 命令，写入 8GB，避免 fallocate 报错和撑爆磁盘
-        sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
-        free -h
-
     - name: Building recovery
       run: |
         # 补丁1：绕过基带检查
@@ -121,11 +112,15 @@ jobs:
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch omni_uws6137-eng && make clean
         
-        # 限制并发数为 4 保护内存
+        # 限制并发数为 4 保护内存，不再折腾 swap
         make recoveryimage -j4
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Upload to Release
       uses: softprops/action-gh-release@v1
       with:
-        files: workspa
+        files: workspace/out/target/product/uws6137/recovery.img
+        name: uws6137-${{ github.run_id }}
+        tag_name: ${{ github.run_id }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
