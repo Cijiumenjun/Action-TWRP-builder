@@ -65,10 +65,13 @@ jobs:
         rm device_tree.zip
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
-    - name: Set Swap Space
-      uses: pierotofy/set-swap-space@master
-      with:
-        swap-size-gb: 12
+    - name: Create Swap Space (防爆内存)
+      run: |
+        sudo fallocate -l 16G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
 
     - name: Building recovery
       run: |
@@ -110,14 +113,14 @@ jobs:
         # 补丁9：修复 int 和 str 比较的报错
         sed -i 's/return any(lower <= value <= upper for (lower, upper) in ranges)/return any(int(lower) <= int(value) <= int(upper) for (lower, upper) in ranges)/g' bionic/libc/fs_config_generator.py
 
-        # 清理占空间的测试文件
-        rm -rf external/llvm/test/CodeGen 2>/dev/null || true
-        
+        # 补丁10：修复 %u 格式化字符串导致类型错误的问题
+        sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' bionic/libc/fs_config_generator.py
+
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch omni_uws6137-eng && make clean
         
-        # 魔法改动：限制并发数为 4，防止 OOM (内存溢出)
+        # 限制并发数为 4 保护内存
         make recoveryimage -j4
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
@@ -125,7 +128,4 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: workspace/out/target/product/uws6137/recovery.img
-        name: uws6137-${{ github.run_id }}
-        tag_name: ${{ github.run_id }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: uws6137-$
