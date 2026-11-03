@@ -67,7 +67,8 @@ jobs:
 
     - name: Create Swap Space (防爆内存)
       run: |
-        sudo fallocate -l 16G /swapfile
+        # 改用 dd 命令，写入 8GB，避免 fallocate 报错和撑爆磁盘
+        sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
         sudo chmod 600 /swapfile
         sudo mkswap /swapfile
         sudo swapon /swapfile
@@ -127,5 +128,4 @@ jobs:
     - name: Upload to Release
       uses: softprops/action-gh-release@v1
       with:
-        files: workspace/out/target/product/uws6137/recovery.img
-        name: uws6137-$
+        files: workspa
