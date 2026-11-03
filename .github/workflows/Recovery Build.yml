@@ -14,7 +14,6 @@ jobs:
     steps:
     - name: Prepare the environment
       run: |
-        df -h /
         sudo apt-get update
         sudo DEBIAN_FRONTEND=noninteractive apt-get -y install \
           bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
@@ -82,23 +81,33 @@ jobs:
       run: |
         exec > >(tee -a recovery-build.log) 2>&1
 
-        # 1. 绕过基带检查
+        # 1. 暴力重写 normalize_path.py，彻底告别语法错误
+        cat > build/tools/normalize_path.py << 'EOF'
+        #!/usr/bin/env python3
+        import os
+        import sys
+
+        if len(sys.argv) < 2:
+            print("Usage: normalize_path.py <path>")
+            sys.exit(1)
+
+        for p in sys.argv[1:]:
+            print(os.path.normpath(p))
+        EOF
+        chmod +x build/tools/normalize_path.py
+
+        # 2. 绕过基带检查
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
-        # 2. 修复 clang 版本脚本
+        # 3. 修复 clang 版本脚本
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
-        # 3. 修复 dumpkey 主类问题：全局修改 Makefile，强制用 -cp 调用
-        grep -rl "java -jar.*dumpkey.jar" build/ | xargs sed -i 's/java -jar \(.*dumpkey.jar\)/java -cp \1 com.android.dumpkey.DumpPublicKey/g' 2>/dev/null || true
-
-        # 4. 修复所有 Python 2 脚本的 print 语法（包含 normalize_path.py）
-        find build/tools -name '*.py' -type f -print0 | while IFS= read -r -d '' f; do
-          sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$f" || true
-          sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$f" || true
-          sed -i 's/\.iteritems()/\.items()/g' "$f" || true
-        done
+        # 4. 为 dumpkey.jar 强行注入 Main-Class 清单，确保不报找不到主类
+        echo "Main-Class: com.android.dumpkey.DumpPublicKey" > build/tools/dumpkey/manifest.txt
+        sed -i '/LOCAL_JAR_MANIFEST/d' build/tools/dumpkey/Android.mk
+        sed -i '/include \$(BUILD_HOST_JAVA_LIBRARY)/i LOCAL_JAR_MANIFEST := $(LOCAL_PATH)/manifest.txt' build/tools/dumpkey/Android.mk
 
         # 5. 修复 fs_config_generator.py 各种问题
         FS_CFG=build/tools/fs_config/fs_config_generator.py
@@ -112,10 +121,17 @@ jobs:
           sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
 
+        # 6. 清理其它可能包含 Python 2 语法的 py 脚本
+        find build/tools -name '*.py' -type f -print0 | while IFS= read -r -d '' f; do
+          sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$f" || true
+          sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$f" || true
+          sed -i 's/\.iteritems()/\.items()/g' "$f" || true
+        done
+
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py || true
         sed -i '/qcom_diag/d' system/core/include/private/android_filesystem_config.h 2>/dev/null || true
 
-        # 6. 编译环境
+        # 7. 编译环境
         export LANG=C
         export LC_ALL=C
         export LC_COLLATE=C
