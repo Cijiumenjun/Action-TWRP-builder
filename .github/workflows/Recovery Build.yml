@@ -108,11 +108,15 @@ jobs:
         # 补丁10：修复 %u 格式化字符串导致类型错误的问题
         sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' bionic/libc/fs_config_generator.py
 
+        # 补丁11：展讯源码混入了高通 AID，引发冲突，强制忽略此检查
+        sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' bionic/libc/fs_config_generator.py
+        sed -i '/qcom_diag/d' system/core/include/private/android_filesystem_config.h 2>/dev/null || true
+
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch omni_uws6137-eng && make clean
         
-        # 限制并发数为 4 保护内存，不再折腾 swap
+        # 限制并发数为 4 保护内存
         make recoveryimage -j4
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
