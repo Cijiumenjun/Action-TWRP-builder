@@ -81,37 +81,29 @@ jobs:
       run: |
         exec > >(tee -a recovery-build.log) 2>&1
 
-        # 1. 暴力删除后新建 normalize_path.py（因为原文件可能是软链，导致重写失效）
-        rm -f build/tools/normalize_path.py
-        cat > build/tools/normalize_path.py << 'EOF'
-        #!/usr/bin/env python3
-        import os
-        import sys
+        # 1. 全盘搜索并强行重写所有的 normalize_path.py，彻底告别 Python 2 语法
+        find . -name "normalize_path.py" -type f -print0 | while IFS= read -r -d '' f; do
+            rm -f "$f"
+            printf '%s\n' '#!/usr/bin/env python3' 'import os' 'import sys' 'for p in sys.argv[1:]:' '    print(os.path.normpath(p))' > "$f"
+            chmod +x "$f"
+        done
 
-        if len(sys.argv) < 2:
-            sys.exit(1)
+        # 2. 全盘搜索 dumpkey 的构建文件，强行注入 manifest.txt
+        DUMPKEY_BP=$(grep -rl 'name: "dumpkey"' --include="*.bp" . 2>/dev/null | head -n 1)
+        if [ -n "$DUMPKEY_BP" ]; then
+            DIR=$(dirname "$DUMPKEY_BP")
+            echo "Patching dumpkey Android.bp at $DIR"
+            echo "Main-Class: com.android.dumpkey.DumpPublicKey" > "$DIR/manifest.txt"
+            sed -i '/java_library_host {/a\    manifest: "manifest.txt",' "$DUMPKEY_BP" || true
+        fi
 
-        for p in sys.argv[1:]:
-            print(os.path.normpath(p))
-        EOF
-        chmod +x build/tools/normalize_path.py
-
-        # 2. 绕过基带检查
+        # 3. 绕过基带检查
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
-        # 3. 修复 clang 版本脚本
+        # 4. 修复 clang 版本脚本
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
-
-        # 4. 修复 dumpkey 主类问题 (先建目录，再写文件)
-        mkdir -p build/tools/dumpkey
-        echo "Main-Class: com.android.dumpkey.DumpPublicKey" > build/tools/dumpkey/manifest.txt
-        # 强行修改 build/tools/dumpkey 下的配置（如果存在）
-        find build/tools/dumpkey -name 'Android.*' -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
-            sed -i '/LOCAL_JAR_MANIFEST/d' "$f" || true
-            sed -i '/manifest:/d' "$f" || true
-        done
 
         # 5. 修复 fs_config_generator.py 各种问题
         FS_CFG=build/tools/fs_config/fs_config_generator.py
