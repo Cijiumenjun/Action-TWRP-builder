@@ -79,22 +79,20 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        exec > >(tee -a recovery-build.log) 2>&1
+        # 1. 修正 normalize_path.py 的 Python 3 语法（强制覆盖）
+        cat > build/tools/normalize_path.py << 'EOF'
+        #!/usr/bin/env python3
+        import os
+        import sys
+        for p in sys.argv[1:]:
+            print(os.path.normpath(p))
+        EOF
+        chmod +x build/tools/normalize_path.py
 
-        # 1. 全盘搜索并强行重写所有的 normalize_path.py，彻底告别 Python 2 语法
-        find . -name "normalize_path.py" -type f -print0 | while IFS= read -r -d '' f; do
-            rm -f "$f"
-            printf '%s\n' '#!/usr/bin/env python3' 'import os' 'import sys' 'for p in sys.argv[1:]:' '    print(os.path.normpath(p))' > "$f"
-            chmod +x "$f"
-        done
-
-        # 2. 全盘搜索 dumpkey 的构建文件，强行注入 manifest.txt
-        DUMPKEY_BP=$(grep -rl 'name: "dumpkey"' --include="*.bp" . 2>/dev/null | head -n 1)
-        if [ -n "$DUMPKEY_BP" ]; then
-            DIR=$(dirname "$DUMPKEY_BP")
-            echo "Patching dumpkey Android.bp at $DIR"
-            echo "Main-Class: com.android.dumpkey.DumpPublicKey" > "$DIR/manifest.txt"
-            sed -i '/java_library_host {/a\    manifest: "manifest.txt",' "$DUMPKEY_BP" || true
+        # 2. 修复 dumpkey.jar 缺少主类的问题
+        if [ -d build/tools/dumpkey ]; then
+            echo "Main-Class: com.android.dumpkey.DumpPublicKey" > build/tools/dumpkey/manifest.txt
+            sed -i '/include \$(BUILD_HOST_JAVA_LIBRARY)/i LOCAL_JAR_MANIFEST := $(LOCAL_PATH)/manifest.txt' build/tools/dumpkey/Android.mk
         fi
 
         # 3. 绕过基带检查
@@ -105,7 +103,7 @@ jobs:
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
-        # 5. 修复 fs_config_generator.py 各种问题
+        # 5. 修复 fs_config_generator.py
         FS_CFG=build/tools/fs_config/fs_config_generator.py
         if [ -f "$FS_CFG" ]; then
           sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$FS_CFG" || true
@@ -117,7 +115,7 @@ jobs:
           sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
 
-        # 6. 清理其它可能包含 Python 2 语法的 py 脚本
+        # 6. 清理其它可能的 python2 语法 (强制加上 || true 防止脚本中断)
         find build/tools -name '*.py' -type f -print0 | while IFS= read -r -d '' f; do
           sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$f" || true
           sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$f" || true
@@ -127,13 +125,13 @@ jobs:
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py || true
         sed -i '/qcom_diag/d' system/core/include/private/android_filesystem_config.h 2>/dev/null || true
 
-        # 7. 编译环境
+        # 7. 编译环境设置
         export LANG=C
         export LC_ALL=C
         export LC_COLLATE=C
         export ALLOW_MISSING_DEPENDENCIES=true
 
-        # 修复 lunch 时调用的 roomservice.py
+        # 替换 roomservice.py
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
 
@@ -153,17 +151,10 @@ jobs:
         echo "=== Using Java ==="
         java -version
 
+        # 开始编译
         make recoveryimage -j4
 
         test -f out/target/product/uws6137/recovery.img
-
-    - name: Upload build log on failure
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-log-${{ github.run_id }}
-        path: workspace/recovery-build.log
-        if-no-files-found: ignore
 
     - name: Upload recovery image
       if: success()
