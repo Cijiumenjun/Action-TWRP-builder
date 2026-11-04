@@ -79,7 +79,26 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 1. 覆盖 normalize_path.py
+        # 1. 强制删除可能残留在 build/tools 下的错误模块
+        rm -rf build/tools/dumpkey
+
+        # 2. 修复原本存在的 bootable/recovery/tools/dumpkey
+        DUMPKEY_DIR="bootable/recovery/tools/dumpkey"
+        if [ -d "$DUMPKEY_DIR" ]; then
+            echo "Main-Class: com.android.dumpkey.DumpPublicKey" > "$DUMPKEY_DIR/manifest.txt"
+            # 修改 Android.mk
+            if [ -f "$DUMPKEY_DIR/Android.mk" ]; then
+                sed -i '/LOCAL_JAR_MANIFEST/d' "$DUMPKEY_DIR/Android.mk"
+                sed -i '/include \$(BUILD_HOST_JAVA_LIBRARY)/i LOCAL_JAR_MANIFEST := $(LOCAL_PATH)/manifest.txt' "$DUMPKEY_DIR/Android.mk"
+            fi
+            # 修改 Android.bp
+            if [ -f "$DUMPKEY_DIR/Android.bp" ]; then
+                sed -i '/manifest:/d' "$DUMPKEY_DIR/Android.bp"
+                sed -i '/java_library_host {/a\    manifest: "manifest.txt",' "$DUMPKEY_DIR/Android.bp"
+            fi
+        fi
+
+        # 3. 顺手把 normalize_path.py 等老问题一并修复
         cat > build/tools/normalize_path.py << 'EOF'
         #!/usr/bin/env python3
         import os
@@ -89,22 +108,6 @@ jobs:
         EOF
         chmod +x build/tools/normalize_path.py
 
-        # 2. 彻底修复 dumpkey 缺少 Main-Class 的问题
-        mkdir -p build/tools/dumpkey
-        echo "Main-Class: com.android.dumpkey.DumpPublicKey" > build/tools/dumpkey/manifest.txt
-        cat > build/tools/dumpkey/Android.mk << 'EOF'
-        LOCAL_PATH := $(call my-dir)
-        include $(CLEAR_VARS)
-        LOCAL_SRC_FILES := $(call all-subdir-java-files)
-        LOCAL_MODULE := dumpkey
-        LOCAL_MODULE_TAGS := optional
-        LOCAL_JAR_MANIFEST := $(LOCAL_PATH)/manifest.txt
-        include $(BUILD_HOST_JAVA_LIBRARY)
-        EOF
-        # 强制修改 Makefile，双管齐下防止 -jar 报错
-        sed -i 's/java -jar \$(DUMPKEY)/java -cp \$(DUMPKEY) com.android.dumpkey.DumpPublicKey/g' build/core/Makefile
-
-        # 3. 其他老脚本修复
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
@@ -140,8 +143,9 @@ jobs:
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
 
-        # 清理可能存在的旧的错误编译缓存
+        # 彻底清理旧的 dumpkey 编译产物和 out 目录（避免之前错误的构建记录影响）
         rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates || true
+        rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates || true
 
         source build/envsetup.sh
         lunch omni_uws6137-eng
