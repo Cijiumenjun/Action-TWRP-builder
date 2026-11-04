@@ -79,7 +79,7 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 1. 修正 normalize_path.py 的 Python 3 语法（强制覆盖）
+        # 1. 覆盖 normalize_path.py
         cat > build/tools/normalize_path.py << 'EOF'
         #!/usr/bin/env python3
         import os
@@ -89,21 +89,28 @@ jobs:
         EOF
         chmod +x build/tools/normalize_path.py
 
-        # 2. 修复 dumpkey.jar 缺少主类的问题
-        if [ -d build/tools/dumpkey ]; then
-            echo "Main-Class: com.android.dumpkey.DumpPublicKey" > build/tools/dumpkey/manifest.txt
-            sed -i '/include \$(BUILD_HOST_JAVA_LIBRARY)/i LOCAL_JAR_MANIFEST := $(LOCAL_PATH)/manifest.txt' build/tools/dumpkey/Android.mk
-        fi
+        # 2. 彻底修复 dumpkey 缺少 Main-Class 的问题
+        mkdir -p build/tools/dumpkey
+        echo "Main-Class: com.android.dumpkey.DumpPublicKey" > build/tools/dumpkey/manifest.txt
+        cat > build/tools/dumpkey/Android.mk << 'EOF'
+        LOCAL_PATH := $(call my-dir)
+        include $(CLEAR_VARS)
+        LOCAL_SRC_FILES := $(call all-subdir-java-files)
+        LOCAL_MODULE := dumpkey
+        LOCAL_MODULE_TAGS := optional
+        LOCAL_JAR_MANIFEST := $(LOCAL_PATH)/manifest.txt
+        include $(BUILD_HOST_JAVA_LIBRARY)
+        EOF
+        # 强制修改 Makefile，双管齐下防止 -jar 报错
+        sed -i 's/java -jar \$(DUMPKEY)/java -cp \$(DUMPKEY) com.android.dumpkey.DumpPublicKey/g' build/core/Makefile
 
-        # 3. 绕过基带检查
+        # 3. 其他老脚本修复
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
-        # 4. 修复 clang 版本脚本
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
-        # 5. 修复 fs_config_generator.py
         FS_CFG=build/tools/fs_config/fs_config_generator.py
         if [ -f "$FS_CFG" ]; then
           sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$FS_CFG" || true
@@ -115,7 +122,6 @@ jobs:
           sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
 
-        # 6. 清理其它可能的 python2 语法 (强制加上 || true 防止脚本中断)
         find build/tools -name '*.py' -type f -print0 | while IFS= read -r -d '' f; do
           sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$f" || true
           sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$f" || true
@@ -125,15 +131,17 @@ jobs:
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py || true
         sed -i '/qcom_diag/d' system/core/include/private/android_filesystem_config.h 2>/dev/null || true
 
-        # 7. 编译环境设置
+        # 4. 编译环境设置
         export LANG=C
         export LC_ALL=C
         export LC_COLLATE=C
         export ALLOW_MISSING_DEPENDENCIES=true
 
-        # 替换 roomservice.py
         printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
+
+        # 清理可能存在的旧的错误编译缓存
+        rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates || true
 
         source build/envsetup.sh
         lunch omni_uws6137-eng
@@ -151,7 +159,6 @@ jobs:
         echo "=== Using Java ==="
         java -version
 
-        # 开始编译
         make recoveryimage -j4
 
         test -f out/target/product/uws6137/recovery.img
