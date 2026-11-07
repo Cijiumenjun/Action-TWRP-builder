@@ -1,196 +1,327 @@
-name: Build Recovery
-
-on:
-  workflow_dispatch:
-
-jobs:
-  build:
-    if: github.event.repository.owner.id == github.event.sender.id
-    runs-on: ubuntu-22.04
-    timeout-minutes: 350
-    permissions:
-      contents: write
-
-    steps:
-    - name: Prepare the environment
-      run: |
-        sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick liblz4-tool libncurses-dev libncurses6 libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip unzip zlib1g-dev python-is-python3 python3 wget
-        sudo dpkg --add-architecture i386
-        sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install libc6:i386 libstdc++6:i386 zlib1g:i386 libncurses6:i386 libtinfo6:i386 || true
-        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install lib32z1-dev || true
-        sudo ln -sf /lib/x86_64-linux-gnu/libncurses.so.6 /lib/x86_64-linux-gnu/libncurses.so.5 || true
-        sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6   /lib/x86_64-linux-gnu/libtinfo.so.5   || true
-        sudo ln -sf /lib/i386-linux-gnu/libncurses.so.6   /lib/i386-linux-gnu/libncurses.so.5   || true
-        sudo ln -sf /lib/i386-linux-gnu/libtinfo.so.6     /lib/i386-linux-gnu/libtinfo.so.5     || true
-
-    - name: Install OpenJDK 8
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'zulu'
-        java-version: '8'
-
-    - name: Install repo
-      run: |
-        mkdir -p ~/bin
-        curl -fL --retry 5 --retry-delay 3 -o ~/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
-        chmod a+x ~/bin/repo
-        sudo ln -sf ~/bin/repo /usr/bin/repo
-
-    - name: Initialize repo
-      id: pwd
-      run: |
-        mkdir -p workspace
-        cd workspace
-        echo "workspace-folder=$(pwd)" >> "$GITHUB_OUTPUT"
-        git config --global user.name "Cijiumenjun"
-        git config --global user.email "cijiumenjun@example.com"
-        repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni -b twrp-8.1
-
-    - name: Repo Sync
-      working-directory: workspace
-      run: |
-        repo sync -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags
-
-    - name: Clone device tree
-      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
-      run: |
-        wget -q https://github.com/Cijiumenjun/w377e/archive/refs/heads/main.zip -O device_tree.zip
-        unzip -q device_tree.zip
-        mkdir -p ./device/sprd
-        rm -rf ./device/sprd/uws6137
-        mv w377e-main ./device/sprd/uws6137
-        rm -f device_tree.zip
-
-    - name: Building recovery
-      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
-      run: |
-        # ============================================================
-        # 1. 彻底清理 dumpkey 相关缓存
-        # ============================================================
-        rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
-        rm -rf out/host/linux-x86/framework/dumpkey.jar
-        rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
-
-        # ============================================================
-        # 2. 按 TWRP 官方标准重写 Android.mk 和清单文件
-        # ============================================================
-        printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > bootable/recovery/tools/dumpkey/DumpPublicKey.mf
-        printf 'LOCAL_PATH := $(call my-dir)\n' > bootable/recovery/tools/dumpkey/Android.mk
-        printf 'ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 26; echo $$?),0)\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'include $(CLEAR_VARS)\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_MODULE := dumpkey\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_SRC_FILES := DumpPublicKey.java\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_JAR_MANIFEST := DumpPublicKey.mf\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_STATIC_JAVA_LIBRARIES := bouncycastle-host\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'include $(BUILD_HOST_JAVA_LIBRARY)\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'endif\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        rm -f bootable/recovery/tools/dumpkey/Android.bp
-        export BUILD_DUMPKEY_FROM_RECOVERY=true
-
-        # ============================================================
-        # 3. 移除 Java 劫持
-        # ============================================================
-        JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
-        if [ -f "$JDK_BIN/java.real" ]; then
-          mv "$JDK_BIN/java.real" "$JDK_BIN/java"
-        fi
-
-        # ============================================================
-        # 4. 修复老脚本
-        # ============================================================
-        printf '#!/usr/bin/env python3\nimport os, sys\nfor p in sys.argv[1:]: print(os.path.normpath(p))\n' > build/tools/normalize_path.py
-        chmod +x build/tools/normalize_path.py
-
-        printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > build/tools/check_radio_versions.py
-        chmod +x build/tools/check_radio_versions.py
-
-        printf '#!/usr/bin/env python3\nprint("#define CLANG_VERSION 8.0.0")\n' > external/clang/clang-version-inc.py
-        chmod +x external/clang/clang-version-inc.py
-
-        FS_CFG=build/tools/fs_config/fs_config_generator.py
-        if [ -f "$FS_CFG" ]; then
-            sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$FS_CFG" || true
-            sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$FS_CFG" || true
-            sed -i 's/\.iteritems()/\.items()/g' "$FS_CFG" || true
-            sed -i 's/import ConfigParser/import configparser/g; s/ConfigParser\./configparser./g' "$FS_CFG" || true
-            sed -i 's/return any(lower <= value <= upper for (lower, upper) in ranges)/return any(int(lower) <= int(value) <= int(upper) for (lower, upper) in ranges)/g' "$FS_CFG" || true
-            sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' "$FS_CFG" || true
-            sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
-        fi
-
-        sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
-
-        printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > vendor/omni/build/tools/roomservice.py
-        chmod +x vendor/omni/build/tools/roomservice.py
-
-        # ============================================================
-        # 5. 环境变量
-        # ============================================================
-        export LANG=C
-        export LC_ALL=C
-        export ALLOW_MISSING_DEPENDENCIES=true
-
-        source build/envsetup.sh
-        lunch omni_uws6137-eng
-
-        # ============================================================
-        # 6. 单独预构建 dumpkey（触发 bouncycastle-host 等依赖）
-        #    即使 MANIFEST 有问题，jar 本身也能生成成功
-        # ============================================================
-        echo "===== 预构建 dumpkey ====="
-        make dumpkey -j4 || true
-
-        # ============================================================
-        # 7. 核心修复：直接修复 dumpkey.jar 里的 MANIFEST.MF
-        # ============================================================
-        JAR_OUT="out/host/linux-x86/framework/dumpkey.jar"
-        if [ -f "$JAR_OUT" ]; then
-          echo "===== 修复前 MANIFEST ====="
-          unzip -p "$JAR_OUT" META-INF/MANIFEST.MF || echo "(无 MANIFEST)"
-          echo ""
-
-          # 创建正确的 MANIFEST 内容
-          rm -rf /tmp/fix_manifest
-          mkdir -p /tmp/fix_manifest/META-INF
-          printf 'Manifest-Version: 1.0\nCreated-By: 1.8.0 (Android)\nMain-Class: com.android.dumpkey.DumpPublicKey\n\n' > /tmp/fix_manifest/META-INF/MANIFEST.MF
-
-          # 用 zip 覆盖 jar 中的 MANIFEST
-          JAR_ABS="$(pwd)/$JAR_OUT"
-          ( cd /tmp/fix_manifest && zip -r "$JAR_ABS" META-INF/ )
-
-          echo "===== 修复后 MANIFEST ====="
-          unzip -p "$JAR_OUT" META-INF/MANIFEST.MF
-          echo "===== MANIFEST 修复结束 ====="
-
-          echo "===== 验证 jar 内 DumpPublicKey.class ====="
-          unzip -l "$JAR_OUT" | grep -i "DumpPublicKey" || echo "警告: 未找到 DumpPublicKey.class"
-          echo "===== 验证结束 ====="
-        else
-          echo "ERROR: dumpkey.jar 未生成，无法继续"
-          exit 1
-        fi
-
-        # ============================================================
-        # 8. 完整构建
-        # ============================================================
-        echo "===== 开始完整构建 recoveryimage ====="
-        make recoveryimage -j4
-
-    - name: Upload recovery image
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: recovery-uws6137-${{ github.run_id }}
-        path: workspace/out/target/product/uws6137/recovery.img
-
-    - name: Upload to Release
-      if: success()
-      uses: softprops/action-gh-release@v2
-      with:
-        files: workspace/out/target/product/uws6137/recovery.img
-        name: uws6137-${{ github.run_id }}
-        tag_name: ${{ github.run_id }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+[ 12% 1692/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/[[ -> busybox
+[ 12% 1693/13697] target StaticLib: libreadline (/home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/STATIC_LIBRARIES/libreadline_intermediates/libreadline.a)
+[ 12% 1694/13697] Export includes file:  -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/EXECUTABLES/init_intermediates/export_includes
+[ 12% 1695/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/devmem -> busybox
+[ 12% 1696/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/df -> busybox
+[ 12% 1697/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/diff -> busybox
+[ 12% 1698/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/cut -> busybox
+[ 12% 1699/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/depmod -> busybox
+[ 12% 1700/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/deallocvt -> busybox
+[ 12% 1701/13697] Import includes file: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/EXECUTABLES/init_intermediates/import_includes
+[ 12% 1702/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/dd -> busybox
+[ 12% 1703/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/dc -> busybox
+[ 12% 1704/13697] Check module type: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/EXECUTABLES/init_intermediates/link_type
+[ 12% 1705/13697] target  C++: init <= system/core/init/bootchart.cpp
+[ 12% 1706/13697] target  C++: init <= system/core/init/keychords.cpp
+[ 12% 1707/13697] target  C++: init <= system/core/init/init_first_stage.cpp
+[ 12% 1708/13697] target  C++: init <= system/core/init/init.cpp
+[ 12% 1709/13697] target  C++: init <= system/core/init/builtins.cpp
+[ 12% 1710/13697] target  C++: init <= system/core/init/property_service.cpp
+[ 12% 1711/13697] target  C++: init <= system/core/init/signal_handler.cpp
+[ 12% 1712/13697] target  C++: init <= system/core/init/watchdogd.cpp
+[ 12% 1713/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/chown -> busybox
+[ 12% 1714/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/chmod -> busybox
+[ 12% 1715/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/date -> busybox
+[ 12% 1716/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/crontab -> busybox
+[ 12% 1717/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/crond -> busybox
+[ 12% 1718/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/cpio -> busybox
+[ 12% 1719/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/cp -> busybox
+[ 12% 1720/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/comm -> busybox
+[ 12% 1721/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/cmp -> busybox
+[ 12% 1722/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/clear -> busybox
+[ 12% 1723/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/chvt -> busybox
+[ 12% 1724/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/chroot -> busybox
+[ 12% 1725/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/arp -> busybox
+[ 12% 1726/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ash -> busybox
+[ 12% 1727/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/awk -> busybox
+[ 12% 1728/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/base64 -> busybox
+[ 12% 1729/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/basename -> busybox
+[ 12% 1730/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/bbconfig -> busybox
+[ 12% 1731/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/chgrp -> busybox
+[ 12% 1732/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/chcon -> busybox
+[ 12% 1733/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/chattr -> busybox
+[ 12% 1734/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/catv -> busybox
+[ 12% 1735/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/cat -> busybox
+[ 12% 1736/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/cal -> busybox
+[ 12% 1737/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/bzip2 -> busybox
+[ 12% 1738/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/bzcat -> busybox
+[ 12% 1739/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/bunzip2 -> busybox
+[ 12% 1740/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/brctl -> busybox
+[ 12% 1741/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/blockdev -> busybox
+[ 12% 1742/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/blkid -> busybox
+[ 12% 1743/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/adjtimex -> busybox
+[ 12% 1744/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/[ -> busybox
+[ 12% 1745/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/dmesg -> busybox
+[ 12% 1746/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/dnsd -> busybox
+[ 12% 1747/13697] target  C++: init <= system/core/init/reboot.cpp
+[ 12% 1748/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/dos2unix -> busybox
+[ 12% 1749/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/du -> busybox
+[ 12% 1750/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/echo -> busybox
+[ 12% 1751/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ed -> busybox
+[ 12% 1752/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/egrep -> busybox
+[ 12% 1753/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/expand -> busybox
+[ 12% 1754/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/env -> busybox
+[ 12% 1755/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/expr -> busybox
+[ 12% 1756/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/false -> busybox
+[ 12% 1757/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/fbsplash -> busybox
+[ 12% 1758/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/fdisk -> busybox
+[ 12% 1759/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/fgconsole -> busybox
+[ 12% 1760/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/fgrep -> busybox
+[ 12% 1761/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/find -> busybox
+[ 12% 1762/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/findfs -> busybox
+[ 12% 1763/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/flash_lock -> busybox
+[ 12% 1764/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/flash_unlock -> busybox
+[ 12% 1765/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/flashcp -> busybox
+[ 12% 1766/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/flock -> busybox
+[ 12% 1767/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/fold -> busybox
+[ 12% 1768/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/free -> busybox
+[ 12% 1769/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/freeramdisk -> busybox
+[ 12% 1770/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/fstrim -> busybox
+[ 12% 1771/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/fsync -> busybox
+[ 12% 1772/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ftpget -> busybox
+[ 12% 1773/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ftpput -> busybox
+[ 12% 1774/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/fuser -> busybox
+[ 12% 1775/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/getenforce -> busybox
+[ 12% 1776/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/getopt -> busybox
+[ 12% 1777/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/getsebool -> busybox
+[ 12% 1778/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/grep -> busybox
+[ 12% 1779/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/groups -> busybox
+[ 12% 1780/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/halt -> busybox
+[ 13% 1781/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/head -> busybox
+[ 13% 1782/13697] target  C++: init <= system/core/init/ueventd_parser.cpp
+[ 13% 1783/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/hexdump -> busybox
+[ 13% 1784/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/hwclock -> busybox
+[ 13% 1785/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/id -> busybox
+[ 13% 1786/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ifconfig -> busybox
+[ 13% 1787/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/inetd -> busybox
+[ 13% 1788/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/insmod -> busybox
+[ 13% 1789/13697] target  C++: init <= system/core/init/ueventd.cpp
+[ 13% 1790/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/install -> busybox
+[ 13% 1791/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ionice -> busybox
+[ 13% 1792/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/iostat -> busybox
+[ 13% 1793/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ip -> busybox
+[ 13% 1794/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/kill -> busybox
+[ 13% 1795/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/killall -> busybox
+[ 13% 1796/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/killall5 -> busybox
+[ 13% 1797/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/less -> busybox
+[ 13% 1798/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/losetup -> busybox
+[ 13% 1799/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ln -> busybox
+[ 13% 1800/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/lsattr -> busybox
+[ 13% 1801/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ls -> busybox
+[ 13% 1802/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/lsmod -> busybox
+[ 13% 1803/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/lspci -> busybox
+[ 13% 1804/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/lzcat -> busybox
+[ 13% 1805/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/lsusb -> busybox
+[ 13% 1806/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/lzma -> busybox
+[ 13% 1807/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/lzop -> busybox
+[ 13% 1808/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/lzopcat -> busybox
+[ 13% 1809/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/man -> busybox
+[ 13% 1810/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/matchpathcon -> busybox
+[ 13% 1811/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/md5sum -> busybox
+[ 13% 1812/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mesg -> busybox
+[ 13% 1813/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mkdir -> busybox
+[ 13% 1814/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mkfifo -> busybox
+[ 13% 1815/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mkfs.ext2 -> busybox
+[ 13% 1816/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mkswap -> busybox
+[ 13% 1817/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mknod -> busybox
+[ 13% 1818/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mktemp -> busybox
+[ 13% 1819/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/modinfo -> busybox
+[ 13% 1820/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/modprobe -> busybox
+[ 13% 1821/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/more -> busybox
+[ 13% 1822/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mount -> busybox
+[ 13% 1823/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mountpoint -> busybox
+[ 13% 1824/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mpstat -> busybox
+[ 13% 1825/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/nanddump -> busybox
+[ 13% 1826/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/mv -> busybox
+[ 13% 1827/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/nandwrite -> busybox
+[ 13% 1828/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/nbd-client -> busybox
+[ 13% 1829/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/netstat -> busybox
+[ 13% 1830/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/nc -> busybox
+[ 13% 1831/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/nmeter -> busybox
+[ 13% 1832/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/nice -> busybox
+[ 13% 1833/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/nohup -> busybox
+[ 13% 1834/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/nslookup -> busybox
+[ 13% 1835/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/od -> busybox
+[ 13% 1836/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ntpd -> busybox
+[ 13% 1837/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/patch -> busybox
+[ 13% 1838/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/openvt -> busybox
+[ 13% 1839/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/pgrep -> busybox
+[ 13% 1840/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/pidof -> busybox
+[ 13% 1841/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ping -> busybox
+[ 13% 1842/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/pipe_progress -> busybox
+[ 13% 1843/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/pkill -> busybox
+[ 13% 1844/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/poweroff -> busybox
+[ 13% 1845/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/pmap -> busybox
+[ 13% 1846/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/printenv -> busybox
+[ 13% 1847/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/printf -> busybox
+[ 13% 1848/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ps -> busybox
+[ 13% 1849/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/pstree -> busybox
+[ 13% 1850/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/pwd -> busybox
+[ 13% 1851/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/pwdx -> busybox
+[ 13% 1852/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/rdate -> busybox
+[ 13% 1853/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/rdev -> busybox
+[ 13% 1854/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/readlink -> busybox
+[ 13% 1855/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/realpath -> busybox
+[ 13% 1856/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/renice -> busybox
+[ 13% 1857/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/reset -> busybox
+[ 13% 1858/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/resize -> busybox
+[ 13% 1859/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/restorecon -> busybox
+[ 13% 1860/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/rev -> busybox
+[ 13% 1861/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/rm -> busybox
+[ 13% 1862/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/rmdir -> busybox
+[ 13% 1863/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/rmmod -> busybox
+[ 13% 1864/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/route -> busybox
+[ 13% 1865/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/runcon -> busybox
+[ 13% 1866/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/run-parts -> busybox
+[ 13% 1867/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/rx -> busybox
+[ 13% 1868/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sed -> busybox
+[ 13% 1869/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/selinuxenabled -> busybox
+[ 13% 1870/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/seq -> busybox
+[ 13% 1871/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sestatus -> busybox
+[ 13% 1872/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/setconsole -> busybox
+[ 13% 1873/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/setenforce -> busybox
+[ 13% 1874/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/setfiles -> busybox
+[ 13% 1875/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/setkeycodes -> busybox
+[ 13% 1876/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/setsebool -> busybox
+[ 13% 1877/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/setserial -> busybox
+[ 13% 1878/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/setsid -> busybox
+[ 13% 1879/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sh -> busybox
+[ 13% 1880/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sha1sum -> busybox
+[ 13% 1881/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sha256sum -> busybox
+[ 13% 1882/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sha3sum -> busybox
+[ 13% 1883/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sha512sum -> busybox
+[ 13% 1884/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sleep -> busybox
+[ 13% 1885/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/smemcap -> busybox
+[ 13% 1886/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sort -> busybox
+[ 13% 1887/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/split -> busybox
+[ 13% 1888/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/strings -> busybox
+[ 13% 1889/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/stty -> busybox
+[ 13% 1890/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/stat -> busybox
+[ 13% 1891/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sum -> busybox
+[ 13% 1892/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/swapoff -> busybox
+[ 13% 1893/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/swapon -> busybox
+[ 13% 1894/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sync -> busybox
+[ 13% 1895/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/tac -> busybox
+[ 13% 1896/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/sysctl -> busybox
+[ 13% 1897/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/tail -> busybox
+[ 13% 1898/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/tar -> busybox
+[ 13% 1899/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/taskset -> busybox
+[ 13% 1900/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/tee -> busybox
+[ 13% 1901/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/telnet -> busybox
+[ 13% 1902/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/telnetd -> busybox
+[ 13% 1903/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/test -> busybox
+[ 13% 1904/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/tftp -> busybox
+[ 13% 1905/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/tftpd -> busybox
+[ 13% 1906/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/time -> busybox
+[ 13% 1907/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/timeout -> busybox
+[ 13% 1908/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/top -> busybox
+[ 13% 1909/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/touch -> busybox
+[ 13% 1910/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/tr -> busybox
+[ 13% 1911/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/traceroute -> busybox
+[ 13% 1912/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/true -> busybox
+[ 13% 1913/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/ttysize -> busybox
+[ 13% 1914/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/uname -> busybox
+[ 13% 1915/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/umount -> busybox
+[ 13% 1916/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/uncompress -> busybox
+[ 13% 1917/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/uniq -> busybox
+[ 14% 1918/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/unix2dos -> busybox
+[ 14% 1919/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/unexpand -> busybox
+[ 14% 1920/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/unlzma -> busybox
+[ 14% 1921/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/unlzop -> busybox
+[ 14% 1922/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/unxz -> busybox
+[ 14% 1923/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/unzip -> busybox
+[ 14% 1924/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/uptime -> busybox
+[ 14% 1925/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/usleep -> busybox
+[ 14% 1926/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/uuencode -> busybox
+[ 14% 1927/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/uudecode -> busybox
+[ 14% 1928/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/vi -> busybox
+[ 14% 1929/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/watch -> busybox
+[ 14% 1930/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/wc -> busybox
+[ 14% 1931/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/wget -> busybox
+[ 14% 1932/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/which -> busybox
+[ 14% 1933/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/whoami -> busybox
+[ 14% 1934/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/xargs -> busybox
+[ 14% 1935/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/xz -> busybox
+[ 14% 1936/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/xzcat -> busybox
+[ 14% 1937/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/yes -> busybox
+[ 14% 1938/13697] Symlink: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/sbin/zcat -> busybox
+[ 14% 1939/13697] Notice file: system/core/toolbox/NOTICE -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/NOTICE_FILES/src/fake_packages/toolbox_symlinks-timestamp.txt
+[ 14% 1940/13697] Notice file: bootable/recovery/NOTICE -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/NOTICE_FILES/src/fake_packages/busybox_symlinks-timestamp.txt
+[ 14% 1941/13697] Fake: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/FAKE/busybox_symlinks_intermediates/busybox_symlinks-timestamp
+[ 14% 1942/13697] Copy: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/root/init.omni.rc
+[ 14% 1943/13697] Install: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/fake_packages/busybox_symlinks-timestamp
+[ 14% 1944/13697] build /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj_arm/STATIC_LIBRARIES/libguitwrp_intermediates/twrp
+[ 14% 1945/13697] target Prebuilt: init.recovery.hlthchrg.rc (/home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/RECOVERY_EXECUTABLES/init.recovery.hlthchrg.rc_intermediates/init.recovery.hlthchrg.rc)
+[ 14% 1946/13697] target Prebuilt: init.recovery.ldconfig.rc (/home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/RECOVERY_EXECUTABLES/init.recovery.ldconfig.rc_intermediates/init.recovery.ldconfig.rc)
+[ 14% 1947/13697] Install: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/root/init.recovery.hlthchrg.rc
+[ 14% 1948/13697] target Prebuilt: twrp (/home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/RECOVERY_EXECUTABLES/twrp_intermediates/twrp)
+[ 14% 1949/13697] Install: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/root/init.recovery.ldconfig.rc
+[ 14% 1950/13697] Generated: (/home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/android-info.txt)
+[ 14% 1951/13697] target Prebuilt: init.recovery.service.rc (/home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/RECOVERY_EXECUTABLES/init.recovery.service.rc_intermediates/init.recovery.service.rc)
+[ 14% 1952/13697] Install: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/recovery/root/twres/twrp
+[ 14% 1953/13697] target Prebuilt: init.recovery.usb.rc (/home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/RECOVERY_EXECUTABLES/init.recovery.usb.rc_intermediates/init.recovery.usb.rc)
+[ 14% 1954/13697] Install: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/root/init.recovery.service.rc
+[ 14% 1955/13697] Copy: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/root/init.zygote64_32.rc
+[ 14% 1956/13697] Install: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/root/init.recovery.usb.rc
+[ 14% 1957/13697] Notice file: external/zlib/NOTICE -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/NOTICE_FILES/src/bin/minigzip.txt
+[ 14% 1958/13697] host Prebuilt: mkbootimg (/home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/mkbootimg_intermediates/mkbootimg)
+[ 14% 1959/13697] Export includes file:  -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/SHARED_LIBRARIES/libcutils_intermediates/export_includes
+[ 14% 1960/13697] Install: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/bin/mkbootimg
+[ 14% 1961/13697] Export includes file:  -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/mkbootfs_intermediates/export_includes
+[ 14% 1962/13697] Import includes file: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/mkbootfs_intermediates/import_includes
+[ 14% 1963/13697] Prebuilt:  (/home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/kernel)
+[ 14% 1964/13697] Target buildinfo: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/ETC/system_build_prop_intermediates/build.prop
+[ 14% 1965/13697] Export includes file:  -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/STATIC_LIBRARIES/libsepol_intermediates/export_includes
+[ 14% 1966/13697] Check module type: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/mkbootfs_intermediates/link_type
+[ 14% 1967/13697] Import includes file: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/sepolicy-analyze_intermediates/import_includes
+[ 14% 1968/13697] Target buildinfo: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/root/default.prop
+[ 14% 1969/13697] build /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/ETC/sepolicy.recovery_intermediates/sepolicy.recovery.conf
+[ 14% 1970/13697] host C: sepolicy-analyze <= system/sepolicy/tools/sepolicy-analyze/sepolicy-analyze.c
+[ 14% 1971/13697] host C: mkbootfs <= system/core/cpio/mkbootfs.c
+[ 14% 1972/13697] host C: sepolicy-analyze <= system/sepolicy/tools/sepolicy-analyze/dups.c
+[ 14% 1973/13697] host C: sepolicy-analyze <= system/sepolicy/tools/sepolicy-analyze/perm.c
+[ 14% 1974/13697] host C: sepolicy-analyze <= system/sepolicy/tools/sepolicy-analyze/booleans.c
+[ 14% 1975/13697] host C: sepolicy-analyze <= system/sepolicy/tools/sepolicy-analyze/typecmp.c
+[ 14% 1976/13697] Check module type: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/STATIC_LIBRARIES/libsepol_intermediates/link_type
+[ 14% 1977/13697] Export includes file:  -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/sepolicy-analyze_intermediates/export_includes
+[ 14% 1978/13697] host C: sepolicy-analyze <= system/sepolicy/tools/sepolicy-analyze/attribute.c
+[ 14% 1979/13697] host C: sepolicy-analyze <= system/sepolicy/tools/sepolicy-analyze/neverallow.c
+[ 14% 1980/13697] Notice file: system/sepolicy/NOTICE -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/NOTICE_FILES/src/recovery/root/sepolicy.txt
+[ 14% 1981/13697] host C: sepolicy-analyze <= system/sepolicy/tools/sepolicy-analyze/utils.c
+[ 14% 1982/13697] Export includes file:  -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/checkfc_intermediates/export_includes
+[ 14% 1983/13697] Import includes file: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/checkfc_intermediates/import_includes
+[ 14% 1984/13697] Import includes file: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/fc_sort_intermediates/import_includes
+[ 14% 1985/13697] Check module type: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/sepolicy-analyze_intermediates/link_type
+[ 14% 1986/13697] Export includes file:  -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/fc_sort_intermediates/export_includes
+[ 14% 1987/13697] Check module type: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/checkfc_intermediates/link_type
+[ 14% 1988/13697] Notice file: system/sepolicy/tools/fc_sort/NOTICE -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/NOTICE_FILES/src/bin/fc_sort.txt
+[ 14% 1989/13697] build /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/ETC/sectxfile_nl_intermediates/sectxfile_nl
+[ 14% 1990/13697] Check module type: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/SHARED_LIBRARIES/libsepol_intermediates/link_type
+[ 14% 1991/13697] Check module type: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/fc_sort_intermediates/link_type
+[ 14% 1992/13697] Export includes file:  -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/version_policy_intermediates/export_includes
+[ 14% 1993/13697] Export includes file:  -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/SHARED_LIBRARIES/libsepol_intermediates/export_includes
+[ 14% 1994/13697] Check module type: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/version_policy_intermediates/link_type
+[ 14% 1995/13697] Import includes file: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/obj/EXECUTABLES/version_policy_intermediates/import_includes
+[ 14% 1996/13697] host C: checkfc <= system/sepolicy/tools/checkfc.c
+[ 14% 1997/13697] host C: fc_sort <= system/sepolicy/tools/fc_sort/fc_sort.c
+[ 14% 1998/13697] build /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/FAKE/selinux_policy_intermediates/reqd_policy_mask.conf
+[ 14% 1999/13697] build /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/ETC/plat_property_contexts_intermediates/plat_property_contexts.tmp
+[ 14% 2000/13697] build /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/FAKE/selinux_policy_intermediates/plat_pub_policy.conf
+[ 14% 2001/13697] Notice file: system/sepolicy/NOTICE -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/NOTICE_FILES/src/recovery/root/plat_property_contexts.txt
+[ 14% 2002/13697] build /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/ETC/nonplat_property_contexts_intermediates/nonplat_property_contexts.tmp
+[ 14% 2003/13697] build /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/ETC/plat_sepolicy.cil_intermediates/plat_policy.conf
+[ 14% 2004/13697] Notice file: system/sepolicy/NOTICE -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/NOTICE_FILES/src/recovery/root/nonplat_property_contexts.txt
+[ 14% 2005/13697] Notice file: system/sepolicy/NOTICE -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/NOTICE_FILES/src/recovery/root/nonplat_file_contexts.txt
+[ 14% 2006/13697] Notice file: system/sepolicy/NOTICE -- /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/NOTICE_FILES/src/recovery/root/plat_file_contexts.txt
+[ 14% 2007/13697] host C: version_policy <= system/sepolicy/tools/version_policy.c
+[ 14% 2008/13697] build /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/ETC/nonplat_sepolicy.cil_intermediates/nonplat_policy.conf
+[ 14% 2009/13697] DumpPublicKey: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates/keys <= build/target/product/security/testkey.x509.pem vendor/omni/build/target/product/security/lineage.x509.pem
+FAILED: /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates/keys 
+/bin/bash -c "(rm -rf /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates/keys ) && (mkdir -p /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates/ ) && (java -jar /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/host/linux-x86/framework/dumpkey.jar build/target/product/security/testkey.x509.pem vendor/omni/build/target/product/security/lineage.x509.pem > /home/runner/work/Action-TWRP-builder/Action-TWRP-builder/workspace/out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates/keys )"
+Error: Could not find or load main class com.android.dumpkey.DumpPublicKey
+[ 14% 2010/13697] //external/e2fsprogs/e2fsck:e2fsck clang dirinfo.c
+[ 14% 2011/13697] //external/e2fsprogs/e2fsck:e2fsck clang pass3.c
+[ 14% 2012/13697] //external/e2fsprogs/e2fsck:e2fsck clang pass5.c
+ninja: build stopped: subcommand failed.
+16:30:00 ninja failed with: exit status 1
+Error: Process completed with exit code 1.
