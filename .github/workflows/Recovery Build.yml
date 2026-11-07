@@ -1,4 +1,4 @@
-name: 构建 Recovery
+name: Build Recovery
 
 on:
   workflow_dispatch:
@@ -79,52 +79,34 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 1. 清理之前可能生成的错误 dumpkey 模块，防止冲突
         rm -rf build/tools/dumpkey
         rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates || true
         rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates || true
 
-        # 2. 找到真正的 dumpkey 目录，直接覆盖配置强行注入 Manifest
-        DUMPKEY_DIR=$(find . -type d -name "dumpkey" | grep -v "out/" | head -n 1)
-        if [ -n "$DUMPKEY_DIR" ]; then
-            echo "Found dumpkey at: $DUMPKEY_DIR"
-            echo "Main-Class: com.android.dumpkey.DumpPublicKey" > "$DUMPKEY_DIR/manifest.txt"
-            
-            # 重写 Android.mk，直接使用相对路径（去掉 LOCAL_PATH 会导致重复拼接的问题）
-            cat > "$DUMPKEY_DIR/Android.mk" << 'EOF'
-LOCAL_PATH := $(call my-dir)
-include $(CLEAR_VARS)
-LOCAL_SRC_FILES := $(call all-subdir-java-files)
-LOCAL_MODULE := dumpkey
-LOCAL_MODULE_TAGS := optional
-LOCAL_JAR_MANIFEST := manifest.txt
-include $(BUILD_HOST_JAVA_LIBRARY)
-EOF
+        echo "Patching dumpkey..."
+        echo "Main-Class: com.android.dumpkey.DumpPublicKey" > bootable/recovery/tools/dumpkey/manifest.txt
+        echo 'LOCAL_PATH := $(call my-dir)' > bootable/recovery/tools/dumpkey/Android.mk
+        echo 'include $(CLEAR_VARS)' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'LOCAL_SRC_FILES := $(call all-subdir-java-files)' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'LOCAL_MODULE := dumpkey' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'LOCAL_MODULE_TAGS := optional' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'LOCAL_JAR_MANIFEST := manifest.txt' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'include $(BUILD_HOST_JAVA_LIBRARY)' >> bootable/recovery/tools/dumpkey/Android.mk
+        rm -f bootable/recovery/tools/dumpkey/Android.bp
 
-            # 如果有 Android.bp，一并重写
-            cat > "$DUMPKEY_DIR/Android.bp" << 'EOF'
-java_library_host {
-    name: "dumpkey",
-    srcs: ["src/**/*.java"],
-    manifest: "manifest.txt",
-}
-EOF
-        fi
-
-        # 3. 顺手把 normalize_path.py 等其他老问题一并修复
-        cat > build/tools/normalize_path.py << 'EOF'
-#!/usr/bin/env python3
-import os
-import sys
-for p in sys.argv[1:]:
-    print(os.path.normpath(p))
-EOF
+        echo "Patching normalize_path.py..."
+        echo '#!/usr/bin/env python3' > build/tools/normalize_path.py
+        echo 'import os' >> build/tools/normalize_path.py
+        echo 'import sys' >> build/tools/normalize_path.py
+        echo 'for p in sys.argv[1:]:' >> build/tools/normalize_path.py
+        echo '    print(os.path.normpath(p))' >> build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
 
-        printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > build/tools/check_radio_versions.py
+        echo "Patching other old scripts..."
+        echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
-        printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
+        echo -e '#!/usr/bin/env python3\nimport sys\nprint("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
         FS_CFG=build/tools/fs_config/fs_config_generator.py
@@ -147,13 +129,12 @@ EOF
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py || true
         sed -i '/qcom_diag/d' system/core/include/private/android_filesystem_config.h 2>/dev/null || true
 
-        # 4. 编译环境设置
         export LANG=C
         export LC_ALL=C
         export LC_COLLATE=C
         export ALLOW_MISSING_DEPENDENCIES=true
 
-        printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'sys.exit(0)' > vendor/omni/build/tools/roomservice.py
+        echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
 
         source build/envsetup.sh
