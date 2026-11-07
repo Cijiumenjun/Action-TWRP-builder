@@ -85,32 +85,26 @@ jobs:
         echo "===== end dumpkey sources ====="
 
         # ============================================================
-        # 3. 重写 Android.mk：显式指定 DumpPublicKey.java，不用 all-subdir-java-files
+        # 3. 关键修复：创建正确的 DumpPublicKey.mf 并重写 Android.mk
         # ============================================================
+        # 3.1 手动创建 Java 清单文件，这是最关键的一步
+        printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > bootable/recovery/tools/dumpkey/DumpPublicKey.mf
+        echo "===== DumpPublicKey.mf content ====="
+        cat bootable/recovery/tools/dumpkey/DumpPublicKey.mf
+        echo "===== end DumpPublicKey.mf ====="
+
+        # 3.2 重写 Android.mk，确保引用正确的 .mf 文件和源文件
         printf 'LOCAL_PATH := $(call my-dir)\n' > bootable/recovery/tools/dumpkey/Android.mk
         printf 'include $(CLEAR_VARS)\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'LOCAL_SRC_FILES := DumpPublicKey.java\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'LOCAL_MODULE := dumpkey\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'LOCAL_MODULE_TAGS := optional\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_JAR_MANIFEST := manifest.txt\n' >> bootable/recovery/tools/dumpkey/Android.mk
+        printf 'LOCAL_JAR_MANIFEST := DumpPublicKey.mf\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'include $(BUILD_HOST_JAVA_LIBRARY)\n' >> bootable/recovery/tools/dumpkey/Android.mk
         rm -f bootable/recovery/tools/dumpkey/Android.bp
 
-        # 写 manifest.txt（注意末尾换行）
-        printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > bootable/recovery/tools/dumpkey/manifest.txt
-
         # ============================================================
-        # 4. 关键修复：把 build/core 里 "java -jar .../dumpkey.jar" 改成
-        #    "java -cp .../dumpkey.jar com.android.dumpkey.DumpPublicKey"
-        #    这样即使 MANIFEST 无效也能正确找到主类
-        # ============================================================
-        for mk in $(grep -rl "dumpkey.jar" build/core/ 2>/dev/null); do
-          echo "Patching $mk"
-          sed -i 's#java -jar \([^ ]*dumpkey\.jar\)#java -cp \1 com.android.dumpkey.DumpPublicKey#g' "$mk"
-        done
-
-        # ============================================================
-        # 5. 移除 Java 劫持（-cp 修复后不再需要，避免它干扰）
+        # 4. 移除旧的 Java 劫持（清单文件修复后不再需要，避免干扰）
         # ============================================================
         JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
         if [ -f "$JDK_BIN/java.real" ]; then
@@ -118,7 +112,7 @@ jobs:
         fi
 
         # ============================================================
-        # 6. 修复老脚本 Python2 -> Python3 及 TWRP 8.1 兼容问题
+        # 5. 修复老脚本 Python2 -> Python3 及 TWRP 8.1 兼容问题
         # ============================================================
         printf '#!/usr/bin/env python3\nimport os, sys\nfor p in sys.argv[1:]: print(os.path.normpath(p))\n' > build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
@@ -146,7 +140,7 @@ jobs:
         chmod +x vendor/omni/build/tools/roomservice.py
 
         # ============================================================
-        # 7. 开始编译
+        # 6. 开始编译
         # ============================================================
         export LANG=C
         export LC_ALL=C
