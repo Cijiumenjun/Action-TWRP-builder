@@ -74,24 +74,9 @@ jobs:
         rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
 
         # ============================================================
-        # 2. 诊断：确认源文件与包名
-        # ============================================================
-        echo "===== dumpkey sources ====="
-        find bootable/recovery/tools/dumpkey -name "*.java" -print
-        for f in $(find bootable/recovery/tools/dumpkey -name "*.java"); do
-          echo "--- $f ---"
-          head -5 "$f"
-        done
-        echo "===== end dumpkey sources ====="
-
-        # ============================================================
-        # 3. 按 TWRP 官方标准重写 Android.mk 和 DumpPublicKey.mf
+        # 2. 按 TWRP 官方标准重写 Android.mk 和清单文件（作为后备）
         # ============================================================
         printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > bootable/recovery/tools/dumpkey/DumpPublicKey.mf
-        echo "===== DumpPublicKey.mf content ====="
-        cat bootable/recovery/tools/dumpkey/DumpPublicKey.mf
-        echo "===== end DumpPublicKey.mf ====="
-
         printf 'LOCAL_PATH := $(call my-dir)\n' > bootable/recovery/tools/dumpkey/Android.mk
         printf 'ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 26; echo $$?),0)\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'include $(CLEAR_VARS)\n' >> bootable/recovery/tools/dumpkey/Android.mk
@@ -102,33 +87,10 @@ jobs:
         printf 'include $(BUILD_HOST_JAVA_LIBRARY)\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'endif\n' >> bootable/recovery/tools/dumpkey/Android.mk
         rm -f bootable/recovery/tools/dumpkey/Android.bp
-
-        # 强制使用 bootable/recovery 下的 dumpkey
         export BUILD_DUMPKEY_FROM_RECOVERY=true
 
         # ============================================================
-        # 4. 关键修复：在 build/core/Makefile 中把 java -jar 改为 java -cp
-        #    不再依赖 MANIFEST.MF，直接指定主类
-        # ============================================================
-        echo "===== Patching build/core/Makefile ====="
-        # 先看看 Makefile 里实际的调用命令是什么
-        grep -n "DUMPKEY_JAR\|dumpkey.jar" build/core/Makefile | head -20
-        # 替换 java -jar $(DUMPKEY_JAR) 为 java -cp $(DUMPKEY_JAR) com.android.dumpkey.DumpPublicKey
-        sed -i 's#java -jar $(DUMPKEY_JAR)#java -cp $(DUMPKEY_JAR) com.android.dumpkey.DumpPublicKey#g' build/core/Makefile
-        # 再检查是否还有其他直接写 dumpkey.jar 的 java -jar 调用
-        grep -rn "java -jar.*dumpkey.jar" build/ vendor/ 2>/dev/null | while read -r line; do
-          echo "Found unpatched: $line"
-        done
-        echo "===== End patching ====="
-
-        # 同时修补 vendor/omni 下可能的调用点
-        for mk in $(grep -rl "java -jar.*dumpkey.jar" vendor/omni/ 2>/dev/null); do
-          echo "Patching vendor: $mk"
-          sed -i 's#java -jar \([^ ]*dumpkey\.jar\)#java -cp \1 com.android.dumpkey.DumpPublicKey#g' "$mk"
-        done
-
-        # ============================================================
-        # 5. 移除 Java 劫持（-cp 修复后不再需要）
+        # 3. 移除 Java 劫持
         # ============================================================
         JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
         if [ -f "$JDK_BIN/java.real" ]; then
@@ -136,14 +98,12 @@ jobs:
         fi
 
         # ============================================================
-        # 6. 修复其他老脚本
+        # 4. 修复其他老脚本
         # ============================================================
         printf '#!/usr/bin/env python3\nimport os, sys\nfor p in sys.argv[1:]: print(os.path.normpath(p))\n' > build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
-
         printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
-
         printf '#!/usr/bin/env python3\nprint("#define CLANG_VERSION 8.0.0")\n' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
@@ -157,20 +117,46 @@ jobs:
             sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' "$FS_CFG" || true
             sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
-
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
-
         printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
 
         # ============================================================
-        # 7. 开始编译
+        # 5. 核心修复：手动编译 dumpkey.jar 并直接覆盖输出目录
+        # ============================================================
+        source build/envsetup.sh
+        lunch omni_uws6137-eng
+
+        echo "===== 手动构建 dumpkey.jar ====="
+        DUMPKEY_DIR="bootable/recovery/tools/dumpkey"
+        DUMPKEY_CLASSES="out/tmp_dumpkey_classes"
+        DUMPKEY_JAR_OUT="out/host/linux-x86/framework/dumpkey.jar"
+
+        rm -rf "$DUMPKEY_CLASSES"
+        mkdir -p "$DUMPKEY_CLASSES"
+
+        # 编译 DumpPublicKey.java
+        javac -d "$DUMPKEY_CLASSES" "$DUMPKEY_DIR/DumpPublicKey.java" 2>&1 || {
+          echo "javac 失败，源文件可能引用了额外依赖，回退到构建系统"
+        }
+
+        # 如果 class 文件生成成功，手动打包成带有正确 Main-Class 的 jar
+        if [ -f "$DUMPKEY_CLASSES/com/android/dumpkey/DumpPublicKey.class" ]; then
+          printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > "$DUMPKEY_CLASSES/MANIFEST.MF"
+          mkdir -p "$(dirname "$DUMPKEY_JAR_OUT")"
+          jar cfm "$DUMPKEY_JAR_OUT" "$DUMPKEY_CLASSES/MANIFEST.MF" -C "$DUMPKEY_CLASSES" .
+          echo "===== 手动构建的 dumpkey.jar 清单 ====="
+          unzip -p "$DUMPKEY_JAR_OUT" META-INF/MANIFEST.MF
+          echo "===== 结束 ====="
+        else
+          echo "class 文件未生成，跳过手动覆盖，依赖构建系统生成"
+        fi
+
+        # ============================================================
+        # 6. 开始编译
         # ============================================================
         export LANG=C
         export LC_ALL=C
         export ALLOW_MISSING_DEPENDENCIES=true
-
-        source build/envsetup.sh
-        lunch omni_uws6137-eng
 
         make recoveryimage -j4
