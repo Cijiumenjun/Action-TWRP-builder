@@ -66,40 +66,44 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 1. 彻底清理 dumpkey 的编译缓存（防止旧的错误记录残留）
+        # 清理缓存
         rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
         rm -rf out/host/linux-x86/framework/dumpkey.jar
         rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
-
-        # 2. 强行覆写 dumpkey 配置，注入 Manifest（修复找不到主类问题）
+        
+        # 修复 dumpkey（纯单行 echo，绝对安全）
         echo "Main-Class: com.android.dumpkey.DumpPublicKey" > bootable/recovery/tools/dumpkey/manifest.txt
-        cat > bootable/recovery/tools/dumpkey/Android.mk << 'EOF'
-LOCAL_PATH := $(call my-dir)
-include $(CLEAR_VARS)
-LOCAL_SRC_FILES := $(call all-subdir-java-files)
-LOCAL_MODULE := dumpkey
-LOCAL_MODULE_TAGS := optional
-LOCAL_JAR_MANIFEST := $(LOCAL_PATH)/manifest.txt
-include $(BUILD_HOST_JAVA_LIBRARY)
-EOF
+        echo 'LOCAL_PATH := $(call my-dir)' > bootable/recovery/tools/dumpkey/Android.mk
+        echo 'include $(CLEAR_VARS)' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'LOCAL_SRC_FILES := $(call all-subdir-java-files)' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'LOCAL_MODULE := dumpkey' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'LOCAL_MODULE_TAGS := optional' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'LOCAL_JAR_MANIFEST := $(LOCAL_PATH)/manifest.txt' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'include $(BUILD_HOST_JAVA_LIBRARY)' >> bootable/recovery/tools/dumpkey/Android.mk
         rm -f bootable/recovery/tools/dumpkey/Android.bp
 
-        # 3. 修复 post_process_props.py 的 Python 2 iteritems() 报错
+        # 修复 post_process_props.py
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
 
-        # 4. 修复 normalize_path.py 的 Python 3 语法
+        # 修复 normalize_path.py (单行)
         echo '#!/usr/bin/env python3' > build/tools/normalize_path.py
         echo 'import os, sys' >> build/tools/normalize_path.py
         echo 'for p in sys.argv[1:]: print(os.path.normpath(p))' >> build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
 
-        # 5. 修复其他老脚本
-        echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > build/tools/check_radio_versions.py
+        # 修复 check_radio_versions.py (单行)
+        echo '#!/usr/bin/env python3' > build/tools/check_radio_versions.py
+        echo 'import sys' >> build/tools/check_radio_versions.py
+        echo 'sys.exit(0)' >> build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
-        echo -e '#!/usr/bin/env python3\nimport sys\nprint("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
+
+        # 修复 clang-version-inc.py (单行)
+        echo '#!/usr/bin/env python3' > external/clang/clang-version-inc.py
+        echo 'import sys' >> external/clang/clang-version-inc.py
+        echo 'print("#define CLANG_VERSION 8.0.0")' >> external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
-        # 6. 修复 fs_config_generator.py
+        # 修复 fs_config_generator.py (单行 sed)
         FS_CFG=build/tools/fs_config/fs_config_generator.py
         if [ -f "$FS_CFG" ]; then
             sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$FS_CFG" || true
@@ -111,8 +115,10 @@ EOF
             sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
 
-        # 7. 修复 roomservice.py
-        echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > vendor/omni/build/tools/roomservice.py
+        # 修复 roomservice.py (单行)
+        echo '#!/usr/bin/env python3' > vendor/omni/build/tools/roomservice.py
+        echo 'import sys' >> vendor/omni/build/tools/roomservice.py
+        echo 'sys.exit(0)' >> vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
 
         export LANG=C
@@ -122,7 +128,6 @@ EOF
         source build/envsetup.sh
         lunch omni_uws6137-eng
         
-        # 限制并发数保护内存
         make recoveryimage -j4
 
     - name: Upload recovery image
