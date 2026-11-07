@@ -74,7 +74,7 @@ jobs:
         rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
 
         # ============================================================
-        # 2. 按 TWRP 官方标准重写 Android.mk 和清单文件（作为后备）
+        # 2. 按 TWRP 官方标准重写 Android.mk 和清单文件
         # ============================================================
         printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > bootable/recovery/tools/dumpkey/DumpPublicKey.mf
         printf 'LOCAL_PATH := $(call my-dir)\n' > bootable/recovery/tools/dumpkey/Android.mk
@@ -98,12 +98,14 @@ jobs:
         fi
 
         # ============================================================
-        # 4. 修复其他老脚本
+        # 4. 修复老脚本
         # ============================================================
         printf '#!/usr/bin/env python3\nimport os, sys\nfor p in sys.argv[1:]: print(os.path.normpath(p))\n' > build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
+
         printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
+
         printf '#!/usr/bin/env python3\nprint("#define CLANG_VERSION 8.0.0")\n' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
@@ -117,46 +119,78 @@ jobs:
             sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' "$FS_CFG" || true
             sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
+
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
+
         printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
 
         # ============================================================
-        # 5. 核心修复：手动编译 dumpkey.jar 并直接覆盖输出目录
-        # ============================================================
-        source build/envsetup.sh
-        lunch omni_uws6137-eng
-
-        echo "===== 手动构建 dumpkey.jar ====="
-        DUMPKEY_DIR="bootable/recovery/tools/dumpkey"
-        DUMPKEY_CLASSES="out/tmp_dumpkey_classes"
-        DUMPKEY_JAR_OUT="out/host/linux-x86/framework/dumpkey.jar"
-
-        rm -rf "$DUMPKEY_CLASSES"
-        mkdir -p "$DUMPKEY_CLASSES"
-
-        # 编译 DumpPublicKey.java
-        javac -d "$DUMPKEY_CLASSES" "$DUMPKEY_DIR/DumpPublicKey.java" 2>&1 || {
-          echo "javac 失败，源文件可能引用了额外依赖，回退到构建系统"
-        }
-
-        # 如果 class 文件生成成功，手动打包成带有正确 Main-Class 的 jar
-        if [ -f "$DUMPKEY_CLASSES/com/android/dumpkey/DumpPublicKey.class" ]; then
-          printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > "$DUMPKEY_CLASSES/MANIFEST.MF"
-          mkdir -p "$(dirname "$DUMPKEY_JAR_OUT")"
-          jar cfm "$DUMPKEY_JAR_OUT" "$DUMPKEY_CLASSES/MANIFEST.MF" -C "$DUMPKEY_CLASSES" .
-          echo "===== 手动构建的 dumpkey.jar 清单 ====="
-          unzip -p "$DUMPKEY_JAR_OUT" META-INF/MANIFEST.MF
-          echo "===== 结束 ====="
-        else
-          echo "class 文件未生成，跳过手动覆盖，依赖构建系统生成"
-        fi
-
-        # ============================================================
-        # 6. 开始编译
+        # 5. 环境变量
         # ============================================================
         export LANG=C
         export LC_ALL=C
         export ALLOW_MISSING_DEPENDENCIES=true
 
+        source build/envsetup.sh
+        lunch omni_uws6137-eng
+
+        # ============================================================
+        # 6. 单独预构建 dumpkey（触发 bouncycastle-host 等依赖）
+        #    即使 MANIFEST 有问题，jar 本身也能生成成功
+        # ============================================================
+        echo "===== 预构建 dumpkey ====="
+        make dumpkey -j4 || true
+
+        # ============================================================
+        # 7. 核心修复：直接修复 dumpkey.jar 里的 MANIFEST.MF
+        # ============================================================
+        JAR_OUT="out/host/linux-x86/framework/dumpkey.jar"
+        if [ -f "$JAR_OUT" ]; then
+          echo "===== 修复前 MANIFEST ====="
+          unzip -p "$JAR_OUT" META-INF/MANIFEST.MF || echo "(无 MANIFEST)"
+          echo ""
+
+          # 创建正确的 MANIFEST 内容
+          rm -rf /tmp/fix_manifest
+          mkdir -p /tmp/fix_manifest/META-INF
+          printf 'Manifest-Version: 1.0\nCreated-By: 1.8.0 (Android)\nMain-Class: com.android.dumpkey.DumpPublicKey\n\n' > /tmp/fix_manifest/META-INF/MANIFEST.MF
+
+          # 用 zip 覆盖 jar 中的 MANIFEST
+          JAR_ABS="$(pwd)/$JAR_OUT"
+          ( cd /tmp/fix_manifest && zip -r "$JAR_ABS" META-INF/ )
+
+          echo "===== 修复后 MANIFEST ====="
+          unzip -p "$JAR_OUT" META-INF/MANIFEST.MF
+          echo "===== MANIFEST 修复结束 ====="
+
+          echo "===== 验证 jar 内 DumpPublicKey.class ====="
+          unzip -l "$JAR_OUT" | grep -i "DumpPublicKey" || echo "警告: 未找到 DumpPublicKey.class"
+          echo "===== 验证结束 ====="
+        else
+          echo "ERROR: dumpkey.jar 未生成，无法继续"
+          exit 1
+        fi
+
+        # ============================================================
+        # 8. 完整构建
+        # ============================================================
+        echo "===== 开始完整构建 recoveryimage ====="
         make recoveryimage -j4
+
+    - name: Upload recovery image
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: recovery-uws6137-${{ github.run_id }}
+        path: workspace/out/target/product/uws6137/recovery.img
+
+    - name: Upload to Release
+      if: success()
+      uses: softprops/action-gh-release@v2
+      with:
+        files: workspace/out/target/product/uws6137/recovery.img
+        name: uws6137-${{ github.run_id }}
+        tag_name: ${{ github.run_id }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
