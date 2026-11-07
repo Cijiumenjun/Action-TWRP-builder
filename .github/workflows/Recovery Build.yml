@@ -66,6 +66,10 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
+        # 1. 修复 post_process_props.py 的 iteritems 报错
+        sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
+
+        # 2. 修复 dumpkey.jar（直接替换 java 脚本）
         JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
         if [ -f "$JDK_BIN/java" ]; then
             mv "$JDK_BIN/java" "$JDK_BIN/java.real"
@@ -79,18 +83,22 @@ jobs:
             echo 'fi' >> "$JDK_BIN/java"
             chmod +x "$JDK_BIN/java"
         fi
-        
+
+        # 3. 修复 normalize_path.py
         echo '#!/usr/bin/env python3' > build/tools/normalize_path.py
         echo 'import os, sys' >> build/tools/normalize_path.py
         echo 'for p in sys.argv[1:]: print(os.path.normpath(p))' >> build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
-        
+
+        # 4. 修复 check_radio_versions.py
         echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
-        
+
+        # 5. 修复 clang-version-inc.py
         echo -e '#!/usr/bin/env python3\nimport sys\nprint("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
+        # 6. 修复 fs_config_generator.py
         FS_CFG=build/tools/fs_config/fs_config_generator.py
         if [ -f "$FS_CFG" ]; then
             sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$FS_CFG" || true
@@ -101,7 +109,8 @@ jobs:
             sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' "$FS_CFG" || true
             sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
-        
+
+        # 7. 修复 roomservice.py
         echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
 
