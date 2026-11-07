@@ -66,35 +66,36 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 1. 修复 post_process_props.py 的 iteritems 报错
+        # 1. 彻底清理 dumpkey 的编译缓存（防止旧的错误记录残留）
+        rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
+        rm -rf out/host/linux-x86/framework/dumpkey.jar
+        rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
+
+        # 2. 强行覆写 dumpkey 配置，注入 Manifest（修复找不到主类问题）
+        echo "Main-Class: com.android.dumpkey.DumpPublicKey" > bootable/recovery/tools/dumpkey/manifest.txt
+        cat > bootable/recovery/tools/dumpkey/Android.mk << 'EOF'
+LOCAL_PATH := $(call my-dir)
+include $(CLEAR_VARS)
+LOCAL_SRC_FILES := $(call all-subdir-java-files)
+LOCAL_MODULE := dumpkey
+LOCAL_MODULE_TAGS := optional
+LOCAL_JAR_MANIFEST := $(LOCAL_PATH)/manifest.txt
+include $(BUILD_HOST_JAVA_LIBRARY)
+EOF
+        rm -f bootable/recovery/tools/dumpkey/Android.bp
+
+        # 3. 修复 post_process_props.py 的 Python 2 iteritems() 报错
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
 
-        # 2. 修复 dumpkey.jar（直接替换 java 脚本）
-        JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
-        if [ -f "$JDK_BIN/java" ]; then
-            mv "$JDK_BIN/java" "$JDK_BIN/java.real"
-            echo '#!/bin/bash' > "$JDK_BIN/java"
-            echo 'if [[ "$*" == *"-jar"* && "$*" == *"dumpkey.jar"* ]]; then' >> "$JDK_BIN/java"
-            echo '    JAR=$(echo "$@" | sed "s/.*-jar \([^ ]*dumpkey.jar\).*/\1/")' >> "$JDK_BIN/java"
-            echo '    ARGS=$(echo "$@" | sed "s/-jar [^ ]*dumpkey.jar/-cp $JAR com.android.dumpkey.DumpPublicKey/")' >> "$JDK_BIN/java"
-            echo '    exec "$(dirname "$0")/java.real" $ARGS' >> "$JDK_BIN/java"
-            echo 'else' >> "$JDK_BIN/java"
-            echo '    exec "$(dirname "$0")/java.real" "$@"' >> "$JDK_BIN/java"
-            echo 'fi' >> "$JDK_BIN/java"
-            chmod +x "$JDK_BIN/java"
-        fi
-
-        # 3. 修复 normalize_path.py
+        # 4. 修复 normalize_path.py 的 Python 3 语法
         echo '#!/usr/bin/env python3' > build/tools/normalize_path.py
         echo 'import os, sys' >> build/tools/normalize_path.py
         echo 'for p in sys.argv[1:]: print(os.path.normpath(p))' >> build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
 
-        # 4. 修复 check_radio_versions.py
+        # 5. 修复其他老脚本
         echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
-
-        # 5. 修复 clang-version-inc.py
         echo -e '#!/usr/bin/env python3\nimport sys\nprint("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
@@ -121,6 +122,7 @@ jobs:
         source build/envsetup.sh
         lunch omni_uws6137-eng
         
+        # 限制并发数保护内存
         make recoveryimage -j4
 
     - name: Upload recovery image
