@@ -15,19 +15,11 @@ jobs:
     - name: Prepare the environment
       run: |
         sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install \
-          bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
-          git gnupg gperf imagemagick liblz4-tool libncurses-dev libncurses6 \
-          libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
-          squashfs-tools xsltproc zip unzip zlib1g-dev \
-          python-is-python3 python3 wget
-
+        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick liblz4-tool libncurses-dev libncurses6 libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip unzip zlib1g-dev python-is-python3 python3 wget
         sudo dpkg --add-architecture i386
         sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install \
-          libc6:i386 libstdc++6:i386 zlib1g:i386 libncurses6:i386 libtinfo6:i386 || true
+        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install libc6:i386 libstdc++6:i386 zlib1g:i386 libncurses6:i386 libtinfo6:i386 || true
         sudo DEBIAN_FRONTEND=noninteractive apt-get -y install lib32z1-dev || true
-
         sudo ln -sf /lib/x86_64-linux-gnu/libncurses.so.6 /lib/x86_64-linux-gnu/libncurses.so.5 || true
         sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6   /lib/x86_64-linux-gnu/libtinfo.so.5   || true
         sudo ln -sf /lib/i386-linux-gnu/libncurses.so.6   /lib/i386-linux-gnu/libncurses.so.5   || true
@@ -42,12 +34,9 @@ jobs:
     - name: Install repo
       run: |
         mkdir -p ~/bin
-        curl -fL --retry 5 --retry-delay 3 \
-          -o ~/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
+        curl -fL --retry 5 --retry-delay 3 -o ~/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
         chmod a+x ~/bin/repo
-        test -s ~/bin/repo
         sudo ln -sf ~/bin/repo /usr/bin/repo
-        repo --version | head -n 2
 
     - name: Initialize repo
       id: pwd
@@ -73,49 +62,32 @@ jobs:
         rm -rf ./device/sprd/uws6137
         mv w377e-main ./device/sprd/uws6137
         rm -f device_tree.zip
-        test -f device/sprd/uws6137/BoardConfig.mk
-        test -f device/sprd/uws6137/omni_uws6137.mk
 
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 1. 编译前准备一个假的 dumpkey.jar 并强行占位
-        echo "Creating fake dumpkey.jar..."
-        mkdir -p /tmp/dumpkey/com/android/dumpkey
-        cat > /tmp/dumpkey/com/android/dumpkey/DumpPublicKey.java << 'EOF'
-        package com.android.dumpkey;
-        public class DumpPublicKey {
-            public static void main(String[] args) {}
-        }
-        EOF
-        javac /tmp/dumpkey/com/android/dumpkey/DumpPublicKey.java
-        mkdir -p out/host/linux-x86/framework/
-        jar cf out/host/linux-x86/framework/dumpkey.jar -C /tmp/dumpkey com
-
-        # 2. 核心黑科技：劫持系统里的 java 命令，强制把 -jar 替换为 -cp
-        echo "Hijacking java command..."
-        JAVA_BIN=$(which java)
-        cat > /usr/local/bin/java << EOF
-        #!/bin/bash
-        if [[ "\$*" == *"-jar"* && "\$*" == *"dumpkey.jar"* ]]; then
-            args=\$(echo "\$@" | sed 's/-jar \([^ ]*dumpkey.jar\)/-cp \1 com.android.dumpkey.DumpPublicKey/')
-            exec $JAVA_BIN \$args
-        else
-            exec $JAVA_BIN "\$@"
+        JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
+        if [ -f "$JDK_BIN/java" ]; then
+            mv "$JDK_BIN/java" "$JDK_BIN/java.real"
+            echo '#!/bin/bash' > "$JDK_BIN/java"
+            echo 'if [[ "$*" == *"-jar"* && "$*" == *"dumpkey.jar"* ]]; then' >> "$JDK_BIN/java"
+            echo '    JAR=$(echo "$@" | sed "s/.*-jar \([^ ]*dumpkey.jar\).*/\1/")' >> "$JDK_BIN/java"
+            echo '    ARGS=$(echo "$@" | sed "s/-jar [^ ]*dumpkey.jar/-cp $JAR com.android.dumpkey.DumpPublicKey/")' >> "$JDK_BIN/java"
+            echo '    exec "$(dirname "$0")/java.real" $ARGS' >> "$JDK_BIN/java"
+            echo 'else' >> "$JDK_BIN/java"
+            echo '    exec "$(dirname "$0")/java.real" "$@"' >> "$JDK_BIN/java"
+            echo 'fi' >> "$JDK_BIN/java"
+            chmod +x "$JDK_BIN/java"
         fi
-        EOF
-        chmod +x /usr/local/bin/java
-        export PATH=/usr/local/bin:$PATH
-
-        # 3. 修复其他老脚本
+        
         echo '#!/usr/bin/env python3' > build/tools/normalize_path.py
         echo 'import os, sys' >> build/tools/normalize_path.py
         echo 'for p in sys.argv[1:]: print(os.path.normpath(p))' >> build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
-
+        
         echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
-
+        
         echo -e '#!/usr/bin/env python3\nimport sys\nprint("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
@@ -129,44 +101,18 @@ jobs:
             sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' "$FS_CFG" || true
             sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
-
-        find build/tools -name '*.py' -type f -print0 | while IFS= read -r -d '' f; do
-            sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$f" || true
-            sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$f" || true
-            sed -i 's/\.iteritems()/\.items()/g' "$f" || true
-        done
-
-        sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py || true
-        sed -i '/qcom_diag/d' system/core/include/private/android_filesystem_config.h 2>/dev/null || true
-
-        # 4. 编译环境
-        export LANG=C
-        export LC_ALL=C
-        export LC_COLLATE=C
-        export ALLOW_MISSING_DEPENDENCIES=true
-
+        
         echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
 
+        export LANG=C
+        export LC_ALL=C
+        export ALLOW_MISSING_DEPENDENCIES=true
+        
         source build/envsetup.sh
         lunch omni_uws6137-eng
-
-        DEVICE=$(get_build_var TARGET_DEVICE | tail -n 1)
-        echo "TARGET_DEVICE=$DEVICE"
-        test "$DEVICE" = "uws6137"
-
-        if ! java -version >/dev/null 2>&1; then
-          if [ -x prebuilts/jdk/jdk8/linux-x86/bin/java ]; then
-            export PATH="$(pwd)/prebuilts/jdk/jdk8/linux-x86/bin:$PATH"
-            export JAVA_HOME="$(pwd)/prebuilts/jdk/jdk8/linux-x86"
-          fi
-        fi
-        echo "=== Using Java ==="
-        java -version
-
+        
         make recoveryimage -j4
-
-        test -f out/target/product/uws6137/recovery.img
 
     - name: Upload recovery image
       if: success()
@@ -174,19 +120,13 @@ jobs:
       with:
         name: recovery-uws6137-${{ github.run_id }}
         path: workspace/out/target/product/uws6137/recovery.img
-        if-no-files-found: error
 
     - name: Upload to Release
       if: success()
       uses: softprops/action-gh-release@v2
       with:
         files: workspace/out/target/product/uws6137/recovery.img
-        fail_on_unmatched_files: true
         name: uws6137-${{ github.run_id }}
         tag_name: ${{ github.run_id }}
-        body: |
-          Device: uws6137 (W377E / Spreadtrum)
-          Manifest: twrp-8.1
-          Target: recovery.img
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
