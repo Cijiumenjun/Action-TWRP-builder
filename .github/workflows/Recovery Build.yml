@@ -79,56 +79,54 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
+        # 1. 清理所有可能冲突的 dumpkey 定义和缓存
         rm -rf build/tools/dumpkey
+        rm -rf bootable/recovery/tools/dumpkey
         rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates || true
         rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates || true
 
-        echo "Patching dumpkey..."
-        echo "Main-Class: com.android.dumpkey.DumpPublicKey" > bootable/recovery/tools/dumpkey/manifest.txt
-        echo 'LOCAL_PATH := $(call my-dir)' > bootable/recovery/tools/dumpkey/Android.mk
-        echo 'include $(CLEAR_VARS)' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'LOCAL_SRC_FILES := $(call all-subdir-java-files)' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'LOCAL_MODULE := dumpkey' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'LOCAL_MODULE_TAGS := optional' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'LOCAL_JAR_MANIFEST := manifest.txt' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'include $(BUILD_HOST_JAVA_LIBRARY)' >> bootable/recovery/tools/dumpkey/Android.mk
-        rm -f bootable/recovery/tools/dumpkey/Android.bp
+        # 2. 劫持 Makefile 中的 java -jar 调用
+        # 在 AOSP 8.1 中，调用 dumpkey 的地方通常在 build/core/Makefile 或相关任务中
+        find build -name "*.mk" -type f -exec grep -l "dumpkey.jar" {} + 2>/dev/null | while read -r f; do
+            echo "Patching $f to use java -cp..."
+            sed -i 's/java -jar \([^ ]*dumpkey.jar\)/java -cp \1 com.android.dumpkey.DumpPublicKey/g' "$f"
+        done
 
-        echo "Patching normalize_path.py..."
+        # 3. 修复 normalize_path.py 和 check_radio_versions.py
         echo '#!/usr/bin/env python3' > build/tools/normalize_path.py
-        echo 'import os' >> build/tools/normalize_path.py
-        echo 'import sys' >> build/tools/normalize_path.py
-        echo 'for p in sys.argv[1:]:' >> build/tools/normalize_path.py
-        echo '    print(os.path.normpath(p))' >> build/tools/normalize_path.py
+        echo 'import os, sys' >> build/tools/normalize_path.py
+        echo 'for p in sys.argv[1:]: print(os.path.normpath(p))' >> build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
 
-        echo "Patching other old scripts..."
         echo -e '#!/usr/bin/env python3\nimport sys\nsys.exit(0)' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
+        # 4. 修复 clang-version-inc.py
         echo -e '#!/usr/bin/env python3\nimport sys\nprint("#define CLANG_VERSION 8.0.0")' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
+        # 5. 修复 fs_config_generator.py (老版本 Python 语法)
         FS_CFG=build/tools/fs_config/fs_config_generator.py
         if [ -f "$FS_CFG" ]; then
-          sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$FS_CFG" || true
-          sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$FS_CFG" || true
-          sed -i 's/\.iteritems()/\.items()/g' "$FS_CFG" || true
-          sed -i 's/import ConfigParser/import configparser/g; s/ConfigParser\./configparser./g' "$FS_CFG" || true
-          sed -i 's/return any(lower <= value <= upper for (lower, upper) in ranges)/return any(int(lower) <= int(value) <= int(upper) for (lower, upper) in ranges)/g' "$FS_CFG" || true
-          sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' "$FS_CFG" || true
-          sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
+            sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$FS_CFG" || true
+            sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$FS_CFG" || true
+            sed -i 's/\.iteritems()/\.items()/g' "$FS_CFG" || true
+            sed -i 's/import ConfigParser/import configparser/g; s/ConfigParser\./configparser./g' "$FS_CFG" || true
+            sed -i 's/return any(lower <= value <= upper for (lower, upper) in ranges)/return any(int(lower) <= int(value) <= int(upper) for (lower, upper) in ranges)/g' "$FS_CFG" || true
+            sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' "$FS_CFG" || true
+            sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
 
         find build/tools -name '*.py' -type f -print0 | while IFS= read -r -d '' f; do
-          sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$f" || true
-          sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$f" || true
-          sed -i 's/\.iteritems()/\.items()/g' "$f" || true
+            sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$f" || true
+            sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$f" || true
+            sed -i 's/\.iteritems()/\.items()/g' "$f" || true
         done
 
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py || true
         sed -i '/qcom_diag/d' system/core/include/private/android_filesystem_config.h 2>/dev/null || true
 
+        # 6. 编译环境
         export LANG=C
         export LC_ALL=C
         export LC_COLLATE=C
