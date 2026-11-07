@@ -66,51 +66,67 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 1. 彻底清理缓存
+        # ============================================================
+        # 1. 彻底清理 dumpkey 相关缓存
+        # ============================================================
         rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
         rm -rf out/host/linux-x86/framework/dumpkey.jar
         rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
 
-        # 2. 重写 Android.mk，使用相对路径（解决双重拼接报错）
-        echo "Main-Class: com.android.dumpkey.DumpPublicKey" > bootable/recovery/tools/dumpkey/manifest.txt
-        echo 'LOCAL_PATH := $(call my-dir)' > bootable/recovery/tools/dumpkey/Android.mk
-        echo 'include $(CLEAR_VARS)' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'LOCAL_SRC_FILES := $(call all-subdir-java-files)' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'LOCAL_MODULE := dumpkey' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'LOCAL_MODULE_TAGS := optional' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'LOCAL_JAR_MANIFEST := manifest.txt' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'include $(BUILD_HOST_JAVA_LIBRARY)' >> bootable/recovery/tools/dumpkey/Android.mk
+        # ============================================================
+        # 2. 诊断：打印 dumpkey 源文件与包名，确认类真实存在
+        # ============================================================
+        echo "===== dumpkey sources ====="
+        find bootable/recovery/tools/dumpkey -name "*.java" -print
+        for f in $(find bootable/recovery/tools/dumpkey -name "*.java"); do
+          echo "--- $f ---"
+          head -5 "$f"
+        done
+        echo "===== end dumpkey sources ====="
+
+        # ============================================================
+        # 3. 重写 Android.mk：显式指定 DumpPublicKey.java，不用 all-subdir-java-files
+        # ============================================================
+        printf 'LOCAL_PATH := $(call my-dir)\n' > bootable/recovery/tools/dumpkey/Android.mk
+        printf 'include $(CLEAR_VARS)\n' >> bootable/recovery/tools/dumpkey/Android.mk
+        printf 'LOCAL_SRC_FILES := DumpPublicKey.java\n' >> bootable/recovery/tools/dumpkey/Android.mk
+        printf 'LOCAL_MODULE := dumpkey\n' >> bootable/recovery/tools/dumpkey/Android.mk
+        printf 'LOCAL_MODULE_TAGS := optional\n' >> bootable/recovery/tools/dumpkey/Android.mk
+        printf 'LOCAL_JAR_MANIFEST := manifest.txt\n' >> bootable/recovery/tools/dumpkey/Android.mk
+        printf 'include $(BUILD_HOST_JAVA_LIBRARY)\n' >> bootable/recovery/tools/dumpkey/Android.mk
         rm -f bootable/recovery/tools/dumpkey/Android.bp
 
-        # 3. 保留 Java 劫持脚本以防万一
+        # 写 manifest.txt（注意末尾换行）
+        printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > bootable/recovery/tools/dumpkey/manifest.txt
+
+        # ============================================================
+        # 4. 关键修复：把 build/core 里 "java -jar .../dumpkey.jar" 改成
+        #    "java -cp .../dumpkey.jar com.android.dumpkey.DumpPublicKey"
+        #    这样即使 MANIFEST 无效也能正确找到主类
+        # ============================================================
+        for mk in $(grep -rl "dumpkey.jar" build/core/ 2>/dev/null); do
+          echo "Patching $mk"
+          sed -i 's#java -jar \([^ ]*dumpkey\.jar\)#java -cp \1 com.android.dumpkey.DumpPublicKey#g' "$mk"
+        done
+
+        # ============================================================
+        # 5. 移除 Java 劫持（-cp 修复后不再需要，避免它干扰）
+        # ============================================================
         JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
-        if [ -f "$JDK_BIN/java" ]; then
-            mv "$JDK_BIN/java" "$JDK_BIN/java.real"
-            echo '#!/bin/bash' > "$JDK_BIN/java"
-            echo 'if [[ "$*" == *"-jar"* && "$*" == *"dumpkey.jar"* ]]; then' >> "$JDK_BIN/java"
-            echo '    JAR=$(echo "$@" | sed "s/.*-jar \([^ ]*dumpkey.jar\).*/\1/")' >> "$JDK_BIN/java"
-            echo '    ARGS=$(echo "$@" | sed "s/-jar [^ ]*dumpkey.jar/-cp $JAR com.android.dumpkey.DumpPublicKey/")' >> "$JDK_BIN/java"
-            echo '    exec "$(dirname "$0")/java.real" $ARGS' >> "$JDK_BIN/java"
-            echo 'else' >> "$JDK_BIN/java"
-            echo '    exec "$(dirname "$0")/java.real" "$@"' >> "$JDK_BIN/java"
-            echo 'fi' >> "$JDK_BIN/java"
-            chmod +x "$JDK_BIN/java"
+        if [ -f "$JDK_BIN/java.real" ]; then
+          mv "$JDK_BIN/java.real" "$JDK_BIN/java"
         fi
 
-        # 4. 修复其他老脚本
-        echo '#!/usr/bin/env python3' > build/tools/normalize_path.py
-        echo 'import os, sys' >> build/tools/normalize_path.py
-        echo 'for p in sys.argv[1:]: print(os.path.normpath(p))' >> build/tools/normalize_path.py
+        # ============================================================
+        # 6. 修复老脚本 Python2 -> Python3 及 TWRP 8.1 兼容问题
+        # ============================================================
+        printf '#!/usr/bin/env python3\nimport os, sys\nfor p in sys.argv[1:]: print(os.path.normpath(p))\n' > build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
 
-        echo '#!/usr/bin/env python3' > build/tools/check_radio_versions.py
-        echo 'import sys' >> build/tools/check_radio_versions.py
-        echo 'sys.exit(0)' >> build/tools/check_radio_versions.py
+        printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
-        echo '#!/usr/bin/env python3' > external/clang/clang-version-inc.py
-        echo 'import sys' >> external/clang/clang-version-inc.py
-        echo 'print("#define CLANG_VERSION 8.0.0")' >> external/clang/clang-version-inc.py
+        printf '#!/usr/bin/env python3\nprint("#define CLANG_VERSION 8.0.0")\n' > external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
         FS_CFG=build/tools/fs_config/fs_config_generator.py
@@ -126,18 +142,19 @@ jobs:
 
         sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
 
-        echo '#!/usr/bin/env python3' > vendor/omni/build/tools/roomservice.py
-        echo 'import sys' >> vendor/omni/build/tools/roomservice.py
-        echo 'sys.exit(0)' >> vendor/omni/build/tools/roomservice.py
+        printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > vendor/omni/build/tools/roomservice.py
         chmod +x vendor/omni/build/tools/roomservice.py
 
+        # ============================================================
+        # 7. 开始编译
+        # ============================================================
         export LANG=C
         export LC_ALL=C
         export ALLOW_MISSING_DEPENDENCIES=true
-        
+
         source build/envsetup.sh
         lunch omni_uws6137-eng
-        
+
         make recoveryimage -j4
 
     - name: Upload recovery image
