@@ -66,44 +66,53 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 清理缓存
+        # 1. 彻底清理缓存
         rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
         rm -rf out/host/linux-x86/framework/dumpkey.jar
         rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
-        
-        # 修复 dumpkey（纯单行 echo，绝对安全）
+
+        # 2. 重写 Android.mk，使用相对路径（解决双重拼接报错）
         echo "Main-Class: com.android.dumpkey.DumpPublicKey" > bootable/recovery/tools/dumpkey/manifest.txt
         echo 'LOCAL_PATH := $(call my-dir)' > bootable/recovery/tools/dumpkey/Android.mk
         echo 'include $(CLEAR_VARS)' >> bootable/recovery/tools/dumpkey/Android.mk
         echo 'LOCAL_SRC_FILES := $(call all-subdir-java-files)' >> bootable/recovery/tools/dumpkey/Android.mk
         echo 'LOCAL_MODULE := dumpkey' >> bootable/recovery/tools/dumpkey/Android.mk
         echo 'LOCAL_MODULE_TAGS := optional' >> bootable/recovery/tools/dumpkey/Android.mk
-        echo 'LOCAL_JAR_MANIFEST := $(LOCAL_PATH)/manifest.txt' >> bootable/recovery/tools/dumpkey/Android.mk
+        echo 'LOCAL_JAR_MANIFEST := manifest.txt' >> bootable/recovery/tools/dumpkey/Android.mk
         echo 'include $(BUILD_HOST_JAVA_LIBRARY)' >> bootable/recovery/tools/dumpkey/Android.mk
         rm -f bootable/recovery/tools/dumpkey/Android.bp
 
-        # 修复 post_process_props.py
-        sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
+        # 3. 保留 Java 劫持脚本以防万一
+        JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
+        if [ -f "$JDK_BIN/java" ]; then
+            mv "$JDK_BIN/java" "$JDK_BIN/java.real"
+            echo '#!/bin/bash' > "$JDK_BIN/java"
+            echo 'if [[ "$*" == *"-jar"* && "$*" == *"dumpkey.jar"* ]]; then' >> "$JDK_BIN/java"
+            echo '    JAR=$(echo "$@" | sed "s/.*-jar \([^ ]*dumpkey.jar\).*/\1/")' >> "$JDK_BIN/java"
+            echo '    ARGS=$(echo "$@" | sed "s/-jar [^ ]*dumpkey.jar/-cp $JAR com.android.dumpkey.DumpPublicKey/")' >> "$JDK_BIN/java"
+            echo '    exec "$(dirname "$0")/java.real" $ARGS' >> "$JDK_BIN/java"
+            echo 'else' >> "$JDK_BIN/java"
+            echo '    exec "$(dirname "$0")/java.real" "$@"' >> "$JDK_BIN/java"
+            echo 'fi' >> "$JDK_BIN/java"
+            chmod +x "$JDK_BIN/java"
+        fi
 
-        # 修复 normalize_path.py (单行)
+        # 4. 修复其他老脚本
         echo '#!/usr/bin/env python3' > build/tools/normalize_path.py
         echo 'import os, sys' >> build/tools/normalize_path.py
         echo 'for p in sys.argv[1:]: print(os.path.normpath(p))' >> build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
 
-        # 修复 check_radio_versions.py (单行)
         echo '#!/usr/bin/env python3' > build/tools/check_radio_versions.py
         echo 'import sys' >> build/tools/check_radio_versions.py
         echo 'sys.exit(0)' >> build/tools/check_radio_versions.py
         chmod +x build/tools/check_radio_versions.py
 
-        # 修复 clang-version-inc.py (单行)
         echo '#!/usr/bin/env python3' > external/clang/clang-version-inc.py
         echo 'import sys' >> external/clang/clang-version-inc.py
         echo 'print("#define CLANG_VERSION 8.0.0")' >> external/clang/clang-version-inc.py
         chmod +x external/clang/clang-version-inc.py
 
-        # 修复 fs_config_generator.py (单行 sed)
         FS_CFG=build/tools/fs_config/fs_config_generator.py
         if [ -f "$FS_CFG" ]; then
             sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$FS_CFG" || true
@@ -115,7 +124,8 @@ jobs:
             sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
         fi
 
-        # 修复 roomservice.py (单行)
+        sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
+
         echo '#!/usr/bin/env python3' > vendor/omni/build/tools/roomservice.py
         echo 'import sys' >> vendor/omni/build/tools/roomservice.py
         echo 'sys.exit(0)' >> vendor/omni/build/tools/roomservice.py
