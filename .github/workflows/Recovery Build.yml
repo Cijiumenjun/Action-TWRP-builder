@@ -67,14 +67,14 @@ jobs:
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
         # ============================================================
-        # 1. 彻底清理 dumpkey 相关缓存和输出
+        # 1. 彻底清理 dumpkey 相关缓存
         # ============================================================
         rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
         rm -rf out/host/linux-x86/framework/dumpkey.jar
         rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
 
         # ============================================================
-        # 2. 诊断：确认 DumpPublicKey.java 存在且包名正确
+        # 2. 诊断：确认源文件与包名
         # ============================================================
         echo "===== dumpkey sources ====="
         find bootable/recovery/tools/dumpkey -name "*.java" -print
@@ -85,15 +85,13 @@ jobs:
         echo "===== end dumpkey sources ====="
 
         # ============================================================
-        # 3. 关键修复：按 TWRP 官方标准重写 Android.mk 和清单文件
+        # 3. 按 TWRP 官方标准重写 Android.mk 和 DumpPublicKey.mf
         # ============================================================
-        # 3.1 创建标准的 DumpPublicKey.mf
         printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > bootable/recovery/tools/dumpkey/DumpPublicKey.mf
         echo "===== DumpPublicKey.mf content ====="
         cat bootable/recovery/tools/dumpkey/DumpPublicKey.mf
         echo "===== end DumpPublicKey.mf ====="
 
-        # 3.2 按 TWRP 官方结构重写 Android.mk
         printf 'LOCAL_PATH := $(call my-dir)\n' > bootable/recovery/tools/dumpkey/Android.mk
         printf 'ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 26; echo $$?),0)\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'include $(CLEAR_VARS)\n' >> bootable/recovery/tools/dumpkey/Android.mk
@@ -105,11 +103,32 @@ jobs:
         printf 'endif\n' >> bootable/recovery/tools/dumpkey/Android.mk
         rm -f bootable/recovery/tools/dumpkey/Android.bp
 
-        # 3.3 强制构建系统使用 bootable/recovery 下的 dumpkey
+        # 强制使用 bootable/recovery 下的 dumpkey
         export BUILD_DUMPKEY_FROM_RECOVERY=true
 
         # ============================================================
-        # 4. 移除 Java 劫持（清单修复后不再需要）
+        # 4. 关键修复：在 build/core/Makefile 中把 java -jar 改为 java -cp
+        #    不再依赖 MANIFEST.MF，直接指定主类
+        # ============================================================
+        echo "===== Patching build/core/Makefile ====="
+        # 先看看 Makefile 里实际的调用命令是什么
+        grep -n "DUMPKEY_JAR\|dumpkey.jar" build/core/Makefile | head -20
+        # 替换 java -jar $(DUMPKEY_JAR) 为 java -cp $(DUMPKEY_JAR) com.android.dumpkey.DumpPublicKey
+        sed -i 's#java -jar $(DUMPKEY_JAR)#java -cp $(DUMPKEY_JAR) com.android.dumpkey.DumpPublicKey#g' build/core/Makefile
+        # 再检查是否还有其他直接写 dumpkey.jar 的 java -jar 调用
+        grep -rn "java -jar.*dumpkey.jar" build/ vendor/ 2>/dev/null | while read -r line; do
+          echo "Found unpatched: $line"
+        done
+        echo "===== End patching ====="
+
+        # 同时修补 vendor/omni 下可能的调用点
+        for mk in $(grep -rl "java -jar.*dumpkey.jar" vendor/omni/ 2>/dev/null); do
+          echo "Patching vendor: $mk"
+          sed -i 's#java -jar \([^ ]*dumpkey\.jar\)#java -cp \1 com.android.dumpkey.DumpPublicKey#g' "$mk"
+        done
+
+        # ============================================================
+        # 5. 移除 Java 劫持（-cp 修复后不再需要）
         # ============================================================
         JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
         if [ -f "$JDK_BIN/java.real" ]; then
@@ -117,7 +136,7 @@ jobs:
         fi
 
         # ============================================================
-        # 5. 修复老脚本 Python2 -> Python3 及 TWRP 8.1 兼容问题
+        # 6. 修复其他老脚本
         # ============================================================
         printf '#!/usr/bin/env python3\nimport os, sys\nfor p in sys.argv[1:]: print(os.path.normpath(p))\n' > build/tools/normalize_path.py
         chmod +x build/tools/normalize_path.py
@@ -145,7 +164,7 @@ jobs:
         chmod +x vendor/omni/build/tools/roomservice.py
 
         # ============================================================
-        # 6. 开始编译
+        # 7. 开始编译
         # ============================================================
         export LANG=C
         export LC_ALL=C
@@ -155,20 +174,3 @@ jobs:
         lunch omni_uws6137-eng
 
         make recoveryimage -j4
-
-    - name: Upload recovery image
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: recovery-uws6137-${{ github.run_id }}
-        path: workspace/out/target/product/uws6137/recovery.img
-
-    - name: Upload to Release
-      if: success()
-      uses: softprops/action-gh-release@v2
-      with:
-        files: workspace/out/target/product/uws6137/recovery.img
-        name: uws6137-${{ github.run_id }}
-        tag_name: ${{ github.run_id }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
