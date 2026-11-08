@@ -20,6 +20,12 @@ jobs:
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y install libc6:i386 libstdc++6:i386 zlib1g:i386 libncurses6:i386 libtinfo6:i386 || true
           sudo DEBIAN_FRONTEND=noninteractive apt-get -y install lib32z1-dev || true
+          # --- 新增：修复 libncurses.so.5 缺失问题 ---
+          sudo ln -sf /lib/x86_64-linux-gnu/libncurses.so.6 /lib/x86_64-linux-gnu/libncurses.so.5 || true
+          sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6   /lib/x86_64-linux-gnu/libtinfo.so.5   || true
+          sudo ln -sf /lib/i386-linux-gnu/libncurses.so.6   /lib/i386-linux-gnu/libncurses.so.5   || true
+          sudo ln -sf /lib/i386-linux-gnu/libtinfo.so.6     /lib/i386-linux-gnu/libtinfo.so.5     || true
+          echo "===== 库链接创建完成 ====="
 
       - name: Install OpenJDK 8
         uses: actions/setup-java@v4
@@ -62,10 +68,24 @@ jobs:
       - name: Building recovery
         working-directory: ${{ steps.pwd.outputs.workspace-folder }}
         run: |
+          # ============================================================
+          # 1. 修复 libncurses.so.5 缺失问题 (针对 clang 工具链)
+          # ============================================================
+          sudo ln -sf /lib/x86_64-linux-gnu/libncurses.so.6 /lib/x86_64-linux-gnu/libncurses.so.5 || true
+          sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6   /lib/x86_64-linux-gnu/libtinfo.so.5   || true
+          sudo ln -sf /lib/i386-linux-gnu/libncurses.so.6   /lib/i386-linux-gnu/libncurses.so.5   || true
+          sudo ln -sf /lib/i386-linux-gnu/libtinfo.so.6     /lib/i386-linux-gnu/libtinfo.so.5     || true
+
+          # ============================================================
+          # 2. 清理 dumpkey 相关缓存
+          # ============================================================
           rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
           rm -rf out/host/linux-x86/framework/dumpkey.jar
           rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
 
+          # ============================================================
+          # 3. 按 TWRP 官方标准重写 dumpkey 的 Android.mk 和清单文件
+          # ============================================================
           DK_DIR=bootable/recovery/tools/dumpkey
           printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > "$DK_DIR/DumpPublicKey.mf"
           printf 'LOCAL_PATH := $(call my-dir)\n' > "$DK_DIR/Android.mk"
@@ -78,10 +98,9 @@ jobs:
           rm -f "$DK_DIR/Android.bp"
           export BUILD_DUMPKEY_FROM_RECOVERY=true
 
-          if [ -f prebuilts/jdk/jdk8/linux-x86/bin/java.real ]; then
-            mv prebuilts/jdk/jdk8/linux-x86/bin/java.real prebuilts/jdk/jdk8/linux-x86/bin/java
-          fi
-
+          # ============================================================
+          # 4. 修复老脚本 Python2 -> Python3 及 TWRP 8.1 兼容问题
+          # ============================================================
           printf '#!/usr/bin/env python3\nimport os, sys\nfor p in sys.argv[1:]: print(os.path.normpath(p))\n' > build/tools/normalize_path.py
           chmod +x build/tools/normalize_path.py
 
@@ -104,6 +123,9 @@ jobs:
           printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > vendor/omni/build/tools/roomservice.py
           chmod +x vendor/omni/build/tools/roomservice.py
 
+          # ============================================================
+          # 5. 开始编译
+          # ============================================================
           export LANG=C
           export LC_ALL=C
           export ALLOW_MISSING_DEPENDENCIES=true
@@ -111,11 +133,15 @@ jobs:
           source build/envsetup.sh
           lunch omni_uws6137-eng
 
+          # 单独预构建 dumpkey，确保 bouncycastle-host 依赖就绪
           make dumpkey -j4 || true
 
+          # ============================================================
+          # 6. 核心修复：直接重写 dumpkey.jar 内的 MANIFEST.MF
+          # ============================================================
           JAR_OUT="out/host/linux-x86/framework/dumpkey.jar"
           if [ ! -f "$JAR_OUT" ]; then
-            echo "ERROR: dumpkey.jar 未生成"
+            echo "ERROR: dumpkey.jar 未生成，无法继续"
             exit 1
           fi
 
@@ -136,6 +162,9 @@ jobs:
           unzip -p "$JAR_OUT" META-INF/MANIFEST.MF
           echo ""
 
+          # ============================================================
+          # 7. 完整构建
+          # ============================================================
           make recoveryimage -j4
 
       - name: Upload recovery image
