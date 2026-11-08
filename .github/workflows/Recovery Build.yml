@@ -12,158 +12,174 @@ jobs:
       contents: write
 
     steps:
-    - name: Prepare the environment
-      run: |
-        sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick liblz4-tool libncurses-dev libncurses6 libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip unzip zlib1g-dev python-is-python3 python3 wget
-        sudo dpkg --add-architecture i386
-        sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install libc6:i386 libstdc++6:i386 zlib1g:i386 libncurses6:i386 libtinfo6:i386 || true
-        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install lib32z1-dev || true
-        sudo ln -sf /lib/x86_64-linux-gnu/libncurses.so.6 /lib/x86_64-linux-gnu/libncurses.so.5 || true
-        sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6   /lib/x86_64-linux-gnu/libtinfo.so.5   || true
-        sudo ln -sf /lib/i386-linux-gnu/libncurses.so.6   /lib/i386-linux-gnu/libncurses.so.5   || true
-        sudo ln -sf /lib/i386-linux-gnu/libtinfo.so.6     /lib/i386-linux-gnu/libtinfo.so.5     || true
+      - name: Prepare the environment
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y install bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick liblz4-tool libncurses-dev libncurses6 libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip unzip zlib1g-dev python-is-python3 python3 wget
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y install libc6:i386 libstdc++6:i386 zlib1g:i386 libncurses6:i386 libtinfo6:i386 || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -y install lib32z1-dev || true
+          # --- 新增：修复 libncurses.so.5 缺失问题 ---
+          sudo ln -sf /lib/x86_64-linux-gnu/libncurses.so.6 /lib/x86_64-linux-gnu/libncurses.so.5 || true
+          sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6   /lib/x86_64-linux-gnu/libtinfo.so.5   || true
+          sudo ln -sf /lib/i386-linux-gnu/libncurses.so.6   /lib/i386-linux-gnu/libncurses.so.5   || true
+          sudo ln -sf /lib/i386-linux-gnu/libtinfo.so.6     /lib/i386-linux-gnu/libtinfo.so.5     || true
+          echo "===== 库链接创建完成 ====="
 
-    - name: Install OpenJDK 8
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'zulu'
-        java-version: '8'
+      - name: Install OpenJDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '8'
 
-    - name: Install repo
-      run: |
-        mkdir -p ~/bin
-        curl -fL --retry 5 --retry-delay 3 -o ~/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
-        chmod a+x ~/bin/repo
-        sudo ln -sf ~/bin/repo /usr/bin/repo
+      - name: Install repo
+        run: |
+          mkdir -p ~/bin
+          curl -fL --retry 5 --retry-delay 3 -o ~/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
+          chmod a+x ~/bin/repo
+          sudo ln -sf ~/bin/repo /usr/bin/repo
 
-    - name: Initialize repo
-      id: pwd
-      run: |
-        mkdir -p workspace
-        cd workspace
-        echo "workspace-folder=$(pwd)" >> "$GITHUB_OUTPUT"
-        git config --global user.name "Cijiumenjun"
-        git config --global user.email "cijiumenjun@example.com"
-        repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni -b twrp-8.1
+      - name: Initialize repo
+        id: pwd
+        run: |
+          mkdir -p workspace
+          cd workspace
+          echo "workspace-folder=$(pwd)" >> "$GITHUB_OUTPUT"
+          git config --global user.name "Cijiumenjun"
+          git config --global user.email "cijiumenjun@example.com"
+          repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni -b twrp-8.1
 
-    - name: Repo Sync
-      working-directory: workspace
-      run: |
-        repo sync -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags
+      - name: Repo Sync
+        working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+        run: |
+          repo sync -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags
 
-    - name: Clone device tree
-      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
-      run: |
-        wget -q https://github.com/Cijiumenjun/w377e/archive/refs/heads/main.zip -O device_tree.zip
-        unzip -q device_tree.zip
-        mkdir -p ./device/sprd
-        rm -rf ./device/sprd/uws6137
-        mv w377e-main ./device/sprd/uws6137
-        rm -f device_tree.zip
+      - name: Clone device tree
+        working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+        run: |
+          wget -q https://github.com/Cijiumenjun/w377e/archive/refs/heads/main.zip -O device_tree.zip
+          unzip -q device_tree.zip
+          mkdir -p ./device/sprd
+          rm -rf ./device/sprd/uws6137
+          mv w377e-main ./device/sprd/uws6137
+          rm -f device_tree.zip
 
-    - name: Building recovery
-      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
-      run: |
-        # ============================================================
-        # 1. 彻底清理 dumpkey 相关缓存
-        # ============================================================
-        rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
-        rm -rf out/host/linux-x86/framework/dumpkey.jar
-        rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
+      - name: Building recovery
+        working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+        run: |
+          # ============================================================
+          # 1. 修复 libncurses.so.5 缺失问题 (针对 clang 工具链)
+          # ============================================================
+          sudo ln -sf /lib/x86_64-linux-gnu/libncurses.so.6 /lib/x86_64-linux-gnu/libncurses.so.5 || true
+          sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6   /lib/x86_64-linux-gnu/libtinfo.so.5   || true
+          sudo ln -sf /lib/i386-linux-gnu/libncurses.so.6   /lib/i386-linux-gnu/libncurses.so.5   || true
+          sudo ln -sf /lib/i386-linux-gnu/libtinfo.so.6     /lib/i386-linux-gnu/libtinfo.so.5     || true
 
-        # ============================================================
-        # 2. 诊断：打印 dumpkey 源文件与包名，确认类真实存在
-        # ============================================================
-        echo "===== dumpkey sources ====="
-        find bootable/recovery/tools/dumpkey -name "*.java" -print
-        for f in $(find bootable/recovery/tools/dumpkey -name "*.java"); do
-          echo "--- $f ---"
-          head -5 "$f"
-        done
-        echo "===== end dumpkey sources ====="
+          # ============================================================
+          # 2. 清理 dumpkey 相关缓存
+          # ============================================================
+          rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
+          rm -rf out/host/linux-x86/framework/dumpkey.jar
+          rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
 
-        # ============================================================
-        # 3. 关键修复：创建正确的 DumpPublicKey.mf 并重写 Android.mk
-        # ============================================================
-        # 3.1 手动创建 Java 清单文件，这是最关键的一步
-        printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > bootable/recovery/tools/dumpkey/DumpPublicKey.mf
-        echo "===== DumpPublicKey.mf content ====="
-        cat bootable/recovery/tools/dumpkey/DumpPublicKey.mf
-        echo "===== end DumpPublicKey.mf ====="
+          # ============================================================
+          # 3. 按 TWRP 官方标准重写 dumpkey 的 Android.mk 和清单文件
+          # ============================================================
+          DK_DIR=bootable/recovery/tools/dumpkey
+          printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > "$DK_DIR/DumpPublicKey.mf"
+          printf 'LOCAL_PATH := $(call my-dir)\n' > "$DK_DIR/Android.mk"
+          printf 'include $(CLEAR_VARS)\n' >> "$DK_DIR/Android.mk"
+          printf 'LOCAL_MODULE := dumpkey\n' >> "$DK_DIR/Android.mk"
+          printf 'LOCAL_SRC_FILES := DumpPublicKey.java\n' >> "$DK_DIR/Android.mk"
+          printf 'LOCAL_JAR_MANIFEST := DumpPublicKey.mf\n' >> "$DK_DIR/Android.mk"
+          printf 'LOCAL_STATIC_JAVA_LIBRARIES := bouncycastle-host\n' >> "$DK_DIR/Android.mk"
+          printf 'include $(BUILD_HOST_JAVA_LIBRARY)\n' >> "$DK_DIR/Android.mk"
+          rm -f "$DK_DIR/Android.bp"
+          export BUILD_DUMPKEY_FROM_RECOVERY=true
 
-        # 3.2 重写 Android.mk，确保引用正确的 .mf 文件和源文件
-        printf 'LOCAL_PATH := $(call my-dir)\n' > bootable/recovery/tools/dumpkey/Android.mk
-        printf 'include $(CLEAR_VARS)\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_SRC_FILES := DumpPublicKey.java\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_MODULE := dumpkey\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_MODULE_TAGS := optional\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_JAR_MANIFEST := DumpPublicKey.mf\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'include $(BUILD_HOST_JAVA_LIBRARY)\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        rm -f bootable/recovery/tools/dumpkey/Android.bp
+          # ============================================================
+          # 4. 修复老脚本 Python2 -> Python3 及 TWRP 8.1 兼容问题
+          # ============================================================
+          printf '#!/usr/bin/env python3\nimport os, sys\nfor p in sys.argv[1:]: print(os.path.normpath(p))\n' > build/tools/normalize_path.py
+          chmod +x build/tools/normalize_path.py
 
-        # ============================================================
-        # 4. 移除旧的 Java 劫持（清单文件修复后不再需要，避免干扰）
-        # ============================================================
-        JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
-        if [ -f "$JDK_BIN/java.real" ]; then
-          mv "$JDK_BIN/java.real" "$JDK_BIN/java"
-        fi
+          printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > build/tools/check_radio_versions.py
+          chmod +x build/tools/check_radio_versions.py
 
-        # ============================================================
-        # 5. 修复老脚本 Python2 -> Python3 及 TWRP 8.1 兼容问题
-        # ============================================================
-        printf '#!/usr/bin/env python3\nimport os, sys\nfor p in sys.argv[1:]: print(os.path.normpath(p))\n' > build/tools/normalize_path.py
-        chmod +x build/tools/normalize_path.py
+          printf '#!/usr/bin/env python3\nprint("#define CLANG_VERSION 8.0.0")\n' > external/clang/clang-version-inc.py
+          chmod +x external/clang/clang-version-inc.py
 
-        printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > build/tools/check_radio_versions.py
-        chmod +x build/tools/check_radio_versions.py
-
-        printf '#!/usr/bin/env python3\nprint("#define CLANG_VERSION 8.0.0")\n' > external/clang/clang-version-inc.py
-        chmod +x external/clang/clang-version-inc.py
-
-        FS_CFG=build/tools/fs_config/fs_config_generator.py
-        if [ -f "$FS_CFG" ]; then
+          FS_CFG=build/tools/fs_config/fs_config_generator.py
+          if [ -f "$FS_CFG" ]; then
             sed -i -E 's/^([[:space:]]*)print >>[[:space:]]*([^,]+),[[:space:]]*(.*)$/\1print(\3, file=\2)/g' "$FS_CFG" || true
             sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/g' "$FS_CFG" || true
             sed -i 's/\.iteritems()/\.items()/g' "$FS_CFG" || true
             sed -i 's/import ConfigParser/import configparser/g; s/ConfigParser\./configparser./g' "$FS_CFG" || true
-            sed -i 's/return any(lower <= value <= upper for (lower, upper) in ranges)/return any(int(lower) <= int(value) <= int(upper) for (lower, upper) in ranges)/g' "$FS_CFG" || true
-            sed -i 's/%u within reserved OEM Range/%s within reserved OEM Range/g' "$FS_CFG" || true
-            sed -i 's/if Utils.in_any_range(aid, self._oem_ranges):/if False and Utils.in_any_range(aid, self._oem_ranges):/g' "$FS_CFG" || true
-        fi
+          fi
 
-        sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
+          sed -i 's/\.iteritems()/\.items()/g' build/tools/post_process_props.py
 
-        printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > vendor/omni/build/tools/roomservice.py
-        chmod +x vendor/omni/build/tools/roomservice.py
+          printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > vendor/omni/build/tools/roomservice.py
+          chmod +x vendor/omni/build/tools/roomservice.py
 
-        # ============================================================
-        # 6. 开始编译
-        # ============================================================
-        export LANG=C
-        export LC_ALL=C
-        export ALLOW_MISSING_DEPENDENCIES=true
+          # ============================================================
+          # 5. 开始编译
+          # ============================================================
+          export LANG=C
+          export LC_ALL=C
+          export ALLOW_MISSING_DEPENDENCIES=true
 
-        source build/envsetup.sh
-        lunch omni_uws6137-eng
+          source build/envsetup.sh
+          lunch omni_uws6137-eng
 
-        make recoveryimage -j4
+          # 单独预构建 dumpkey，确保 bouncycastle-host 依赖就绪
+          make dumpkey -j4 || true
 
-    - name: Upload recovery image
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: recovery-uws6137-${{ github.run_id }}
-        path: workspace/out/target/product/uws6137/recovery.img
+          # ============================================================
+          # 6. 核心修复：直接重写 dumpkey.jar 内的 MANIFEST.MF
+          # ============================================================
+          JAR_OUT="out/host/linux-x86/framework/dumpkey.jar"
+          if [ ! -f "$JAR_OUT" ]; then
+            echo "ERROR: dumpkey.jar 未生成，无法继续"
+            exit 1
+          fi
 
-    - name: Upload to Release
-      if: success()
-      uses: softprops/action-gh-release@v2
-      with:
-        files: workspace/out/target/product/uws6137/recovery.img
-        name: uws6137-${{ github.run_id }}
-        tag_name: ${{ github.run_id }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "===== 修复前 MANIFEST ====="
+          unzip -p "$JAR_OUT" META-INF/MANIFEST.MF || true
+          echo ""
+
+          mkdir -p /tmp/dk_manifest/META-INF
+          printf 'Manifest-Version: 1.0\nCreated-By: Android\nMain-Class: com.android.dumpkey.DumpPublicKey\n\n' > /tmp/dk_manifest/META-INF/MANIFEST.MF
+
+          ORIG_DIR="$(pwd)"
+          JAR_ABS="$ORIG_DIR/$JAR_OUT"
+          cd /tmp/dk_manifest
+          zip -r "$JAR_ABS" META-INF/
+          cd "$ORIG_DIR"
+
+          echo "===== 修复后 MANIFEST ====="
+          unzip -p "$JAR_OUT" META-INF/MANIFEST.MF
+          echo ""
+
+          # ============================================================
+          # 7. 完整构建
+          # ============================================================
+          make recoveryimage -j4
+
+      - name: Upload recovery image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-uws6137-${{ github.run_id }}
+          path: workspace/out/target/product/uws6137/recovery.img
+
+      - name: Upload to Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          files: workspace/out/target/product/uws6137/recovery.img
+          name: uws6137-${{ github.run_id }}
+          tag_name: ${{ github.run_id }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
