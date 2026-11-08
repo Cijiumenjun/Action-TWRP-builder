@@ -63,12 +63,10 @@ jobs:
     - name: Building recovery
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
-        # 清理 dumpkey 缓存
         rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
         rm -rf out/host/linux-x86/framework/dumpkey.jar
         rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
 
-        # 重写 dumpkey 的 Android.mk 和清单文件
         DK_DIR=bootable/recovery/tools/dumpkey
         echo 'Main-Class: com.android.dumpkey.DumpPublicKey' > "$DK_DIR/DumpPublicKey.mf"
         echo 'LOCAL_PATH := $(call my-dir)' > "$DK_DIR/Android.mk"
@@ -81,13 +79,11 @@ jobs:
         rm -f "$DK_DIR/Android.bp"
         export BUILD_DUMPKEY_FROM_RECOVERY=true
 
-        # 移除 Java 劫持
         JDK_BIN=prebuilts/jdk/jdk8/linux-x86/bin
         if [ -f "$JDK_BIN/java.real" ]; then
           mv "$JDK_BIN/java.real" "$JDK_BIN/java"
         fi
 
-        # 修复老脚本
         echo '#!/usr/bin/env python3' > build/tools/normalize_path.py
         echo 'import os, sys' >> build/tools/normalize_path.py
         echo 'for p in sys.argv[1:]: print(os.path.normpath(p))' >> build/tools/normalize_path.py
@@ -116,10 +112,8 @@ jobs:
         source build/envsetup.sh
         lunch omni_uws6137-eng
 
-        # 单独预构建 dumpkey，确保依赖就绪
         make dumpkey -j4 || true
 
-        # 修复 dumpkey.jar 的 MANIFEST
         JAR_OUT=out/host/linux-x86/framework/dumpkey.jar
         if [ ! -f "$JAR_OUT" ]; then
           echo "ERROR: dumpkey.jar 未生成"
@@ -144,8 +138,15 @@ jobs:
         echo "===== 修复后 MANIFEST ====="
         unzip -p "$JAR_OUT" META-INF/MANIFEST.MF
 
-        # 完整构建
-        make recoveryimage -j4
+        set +e
+        make recoveryimage -j4 2>&1 | tee /tmp/build.log
+        BUILD_STATUS=${PIPESTATUS[0]}
+        set -e
+        if [ "$BUILD_STATUS" -ne 0 ]; then
+          echo "===== BUILD FAILED, last 150 lines ====="
+          tail -150 /tmp/build.log
+          exit "$BUILD_STATUS"
+        fi
 
     - name: Upload recovery image
       if: success()
