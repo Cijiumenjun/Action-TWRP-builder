@@ -7,8 +7,6 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
-    permissions:
-      contents: write
 
     steps:
     - name: Prepare the environment
@@ -155,13 +153,3 @@ jobs:
       with:
         name: recovery-uws6137-${{ github.run_id }}
         path: workspace/out/target/product/uws6137/recovery.img
-
-    - name: Upload to Release
-      if: success()
-      uses: softprops/action-gh-release@v2
-      with:
-        files: workspace/out/target/product/uws6137/recovery.img
-        name: uws6137-${{ github.run_id }}
-        tag_name: ${{ github.run_id }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
