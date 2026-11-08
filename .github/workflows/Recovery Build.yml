@@ -67,14 +67,14 @@ jobs:
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       run: |
         # ============================================================
-        # 1. 彻底清理 dumpkey 相关缓存和输出
+        # 1. 彻底清理 dumpkey 相关缓存
         # ============================================================
         rm -rf out/host/common/obj/JAVA_LIBRARIES/dumpkey_intermediates
         rm -rf out/host/linux-x86/framework/dumpkey.jar
         rm -rf out/target/product/uws6137/obj/PACKAGING/ota_keys_intermediates
 
         # ============================================================
-        # 2. 诊断：确认 DumpPublicKey.java 存在且包名正确
+        # 2. 诊断：打印 dumpkey 源文件与包名，确认类真实存在
         # ============================================================
         echo "===== dumpkey sources ====="
         find bootable/recovery/tools/dumpkey -name "*.java" -print
@@ -85,31 +85,26 @@ jobs:
         echo "===== end dumpkey sources ====="
 
         # ============================================================
-        # 3. 关键修复：按 TWRP 官方标准重写 Android.mk 和清单文件
+        # 3. 关键修复：创建正确的 DumpPublicKey.mf 并重写 Android.mk
         # ============================================================
-        # 3.1 创建标准的 DumpPublicKey.mf
+        # 3.1 手动创建 Java 清单文件，这是最关键的一步
         printf 'Main-Class: com.android.dumpkey.DumpPublicKey\n' > bootable/recovery/tools/dumpkey/DumpPublicKey.mf
         echo "===== DumpPublicKey.mf content ====="
         cat bootable/recovery/tools/dumpkey/DumpPublicKey.mf
         echo "===== end DumpPublicKey.mf ====="
 
-        # 3.2 按 TWRP 官方结构重写 Android.mk
+        # 3.2 重写 Android.mk，确保引用正确的 .mf 文件和源文件
         printf 'LOCAL_PATH := $(call my-dir)\n' > bootable/recovery/tools/dumpkey/Android.mk
-        printf 'ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 26; echo $$?),0)\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'include $(CLEAR_VARS)\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_MODULE := dumpkey\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'LOCAL_SRC_FILES := DumpPublicKey.java\n' >> bootable/recovery/tools/dumpkey/Android.mk
+        printf 'LOCAL_MODULE := dumpkey\n' >> bootable/recovery/tools/dumpkey/Android.mk
+        printf 'LOCAL_MODULE_TAGS := optional\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'LOCAL_JAR_MANIFEST := DumpPublicKey.mf\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'LOCAL_STATIC_JAVA_LIBRARIES := bouncycastle-host\n' >> bootable/recovery/tools/dumpkey/Android.mk
         printf 'include $(BUILD_HOST_JAVA_LIBRARY)\n' >> bootable/recovery/tools/dumpkey/Android.mk
-        printf 'endif\n' >> bootable/recovery/tools/dumpkey/Android.mk
         rm -f bootable/recovery/tools/dumpkey/Android.bp
 
-        # 3.3 强制构建系统使用 bootable/recovery 下的 dumpkey
-        export BUILD_DUMPKEY_FROM_RECOVERY=true
-
         # ============================================================
-        # 4. 移除 Java 劫持（清单修复后不再需要）
+        # 4. 移除旧的 Java 劫持（清单文件修复后不再需要，避免干扰）
         # ============================================================
         JDK_BIN="prebuilts/jdk/jdk8/linux-x86/bin"
         if [ -f "$JDK_BIN/java.real" ]; then
